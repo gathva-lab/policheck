@@ -6,6 +6,7 @@ import { Progress } from '@/components/ui/progress';
 import { Alert, AlertTitle, AlertDescription } from '@/components/ui/alert';
 import { Accordion, AccordionItem, AccordionTrigger, AccordionContent } from '@/components/ui/accordion';
 import { AlertTriangle, ShieldCheck, Activity, BrainCircuit } from 'lucide-react';
+import { displayLabel, colorFromLabel, type VeracityColor } from '@/lib/veracity';
 
 interface AIReport {
     id: string;
@@ -19,8 +20,22 @@ interface AIReport {
     [key: string]: unknown;
 }
 
+interface SourceVerdict {
+    verdict: string | null;
+    requires_review: boolean;
+}
+
+const BADGE_CLASS: Record<VeracityColor, string> = {
+    green: "bg-emerald-100 text-emerald-800 dark:bg-emerald-900/40 dark:text-emerald-300",
+    yellow: "bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-300",
+    orange: "bg-orange-100 text-orange-800 dark:bg-orange-900/40 dark:text-orange-300",
+    red: "bg-red-100 text-red-800 dark:bg-red-900/40 dark:text-red-300",
+    gray: "bg-slate-200 text-slate-700 dark:bg-slate-800 dark:text-slate-300",
+};
+
 export function AnalysisResults({ sourceId }: { sourceId: string }) {
     const [reports, setReports] = useState<AIReport[]>([]);
+    const [verdict, setVerdict] = useState<SourceVerdict | null>(null);
     const [loading, setLoading] = useState(true);
 
     useEffect(() => {
@@ -28,16 +43,23 @@ export function AnalysisResults({ sourceId }: { sourceId: string }) {
         let interval: NodeJS.Timeout;
 
         const fetchReports = async () => {
-            const { data, error } = await supabase
-                .from('ai_reports')
-                .select('*')
-                .eq('source_id', sourceId);
+            const [reportsRes, sourceRes] = await Promise.all([
+                supabase.from('ai_reports').select('*').eq('source_id', sourceId),
+                supabase.from('sources').select('verdict, requires_review').eq('id', sourceId).maybeSingle(),
+            ]);
 
-            if (data && data.length > 0) {
-                setReports(data);
+            if (reportsRes.data && reportsRes.data.length > 0) {
+                setReports(reportsRes.data);
                 setLoading(false);
-            } else if (error) {
-                console.error("Error fetching reports:", error);
+            } else if (reportsRes.error) {
+                console.error("Error fetching reports:", reportsRes.error);
+            }
+
+            if (sourceRes.data) {
+                setVerdict({
+                    verdict: sourceRes.data.verdict ?? null,
+                    requires_review: sourceRes.data.requires_review ?? false,
+                });
             }
         };
 
@@ -106,6 +128,26 @@ export function AnalysisResults({ sourceId }: { sourceId: string }) {
         return "text-red-600 dark:text-red-400";
     };
 
+    const verdictColor = colorFromLabel(verdict?.verdict ?? null);
+
+    const renderVerdictBadge = () => {
+        if (verdict?.requires_review || !verdict?.verdict) {
+            return (
+                <span className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-300 text-sm font-semibold">
+                    <Activity className="h-4 w-4" />
+                    En revisión
+                </span>
+            );
+        }
+        const display = displayLabel(verdict.verdict);
+        const cls = BADGE_CLASS[verdictColor ?? "gray"];
+        return (
+            <span className={`inline-flex items-center gap-2 px-3 py-1 rounded-full ${cls} text-sm font-semibold`}>
+                {display ?? verdict.verdict}
+            </span>
+        );
+    };
+
     return (
         <div className="mt-5 p-5 md:p-6 border rounded-2xl bg-white dark:bg-slate-950 shadow-sm space-y-6">
             {/* Cabecera y Promedios */}
@@ -113,6 +155,7 @@ export function AnalysisResults({ sourceId }: { sourceId: string }) {
                 <h4 className="font-bold text-xl flex items-center gap-2 mb-5">
                     <BrainCircuit className="h-6 w-6 text-primary" />
                     Consenso Inteligencia Artificial
+                    <span className="ml-auto">{renderVerdictBadge()}</span>
                 </h4>
 
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-6 md:gap-8">

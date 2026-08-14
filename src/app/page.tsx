@@ -8,6 +8,7 @@ interface PoliticianRow {
   political_party: string;
   position: string;
   profile_image_url: string | null;
+  veracity_score?: number | null;
 }
 
 // Agrupar políticos por partido
@@ -22,12 +23,34 @@ function groupByParty(politicians: PoliticianRow[]) {
 
 
 export default async function Home() {
-  const { data: politicians, error } = await supabase
-    .from("politicians")
-    .select("id, full_name, political_party, position, profile_image_url")
-    .order("full_name", { ascending: true });
+  const [{ data: politicians, error }, { data: sourceScores }] = await Promise.all([
+    supabase
+      .from("politicians")
+      .select("id, full_name, political_party, position, profile_image_url")
+      .order("full_name", { ascending: true }),
+    supabase
+      .from("sources")
+      .select("politician_id, verdict_score")
+      .eq("requires_review", false)
+      .not("verdict_score", "is", null),
+  ]);
 
-  const grouped = politicians ? groupByParty(politicians) : {};
+  // Score agregado del político: promedio de verdict_score de sus fuentes verificadas (0-100)
+  const scoresByPolitician = new Map<string, number[]>();
+  for (const row of sourceScores ?? []) {
+    const list = scoresByPolitician.get(row.politician_id) ?? [];
+    list.push(Number(row.verdict_score));
+    scoresByPolitician.set(row.politician_id, list);
+  }
+
+  const withScores: PoliticianRow[] = (politicians ?? []).map((p) => {
+    const scores = scoresByPolitician.get(p.id);
+    const average =
+      scores && scores.length > 0 ? Math.round(scores.reduce((acc, s) => acc + s, 0) / scores.length) : null;
+    return { ...p, veracity_score: average };
+  });
+
+  const grouped = withScores ? groupByParty(withScores) : {};
   const partyNames = Object.keys(grouped).sort();
   const totalCount = politicians?.length ?? 0;
 
