@@ -26,6 +26,33 @@ Ninguna clave se referencia desde el cliente. `NEXT_PUBLIC_*` es pública por di
 
 El esquema de BD está versionado en `supabase/migrations/` (idempotente, pensado para Supabase donde existe el schema `auth` con `auth.uid()`/`auth.users`).
 
+## Deploy en Cloudflare Workers
+
+El proyecto usa el adaptador [OpenNext para Cloudflare](https://opennext.js.org/cloudflare) (Workers, no Pages). La configuración vive en `wrangler.jsonc` (`nodejs_compat` + binding `ASSETS`) y `open-next.config.ts`.
+
+```bash
+npm run build:cf     # genera .open-next/worker.js y .open-next/assets
+npm run preview:cf   # sirve el worker en local con wrangler
+npm run deploy:cf    # despliega en Cloudflare (requiere sesión/token)
+```
+
+Variables de entorno requeridas en el deploy (secretos de Cloudflare):
+
+| Variable | Uso |
+|---|---|
+| `NEXT_PUBLIC_SUPABASE_URL` | URL del proyecto Supabase |
+| `NEXT_PUBLIC_SUPABASE_ANON_KEY` | Clave anónima pública (cliente + SSR) |
+| `SUPABASE_SERVICE_ROLE_KEY` | Clave `service_role` (solo servidor) |
+| `OPENROUTER_API_KEY` | Clave de OpenRouter para el análisis multi-modelo |
+
+Opcionales futuras: `DEEPSEEK_API_KEY`, `NVIDIA_API_KEY`.
+
+Notas de compatibilidad:
+
+- El route handler `src/app/api/analyze/route.ts` mantiene `runtime = 'nodejs'`; OpenNext lo soporta gracias a `nodejs_compat`.
+- La optimización de imágenes de Next no corre en Workers: `next.config.ts` usa `images.unoptimized: true`. Si se necesita optimización, usar las transformaciones de imagen de Cloudflare.
+- `@opennextjs/cloudflare` está fijado en `1.15.0` porque es la última versión compatible con `next@15.4.10` (versiones posteriores requieren `next >= 15.5.x`).
+
 ## Getting Started
 
 First, run the development server:
