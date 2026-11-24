@@ -1,5 +1,31 @@
 This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
 
+## Variables de entorno requeridas
+
+Copia `.env.example` a `.env.local` y completa los valores:
+
+| Variable | Uso |
+|---|---|
+| `NEXT_PUBLIC_SUPABASE_URL` | URL del proyecto Supabase |
+| `NEXT_PUBLIC_SUPABASE_ANON_KEY` | Clave anónima pública (cliente + SSR) |
+| `SUPABASE_SERVICE_ROLE_KEY` | Clave `service_role` (solo servidor): escrituras internas del pipeline |
+| `OPENROUTER_API_KEY` | Clave de OpenRouter para el análisis multi-modelo (solo servidor) |
+
+Ninguna clave se referencia desde el cliente. `NEXT_PUBLIC_*` es pública por diseño; el resto vive en los secretos del deploy (Vercel/Cloudflare).
+
+## Pipeline de análisis IA
+
+`POST /api/analyze` (route handler, sin n8n):
+
+1. Extrae el contenido de la URL (cheerio para artículos; oEmbed + transcripción opcional para YouTube).
+2. Cache: si la URL ya existe en `sources`, devuelve el registro sin re-analizar.
+3. Rate limit: máx. 5 análisis/día por usuario autenticado (HTTP 429).
+4. Consulta el triplete activo de `ai_model_config` (capa `free` primero) y llama a 3 modelos OpenRouter en paralelo con fallback a la capa económica.
+5. Consenso FEVER (taxonomía 8 niveles, veracidad 0-100) en `src/lib/consensus.ts`; acuerdo <60% → `requires_review`.
+6. Persiste `ai_reports`, `sources.verdict`/`verdict_score` y `ai_cost_log`.
+
+El esquema de BD está versionado en `supabase/migrations/` (idempotente, pensado para Supabase donde existe el schema `auth` con `auth.uid()`/`auth.users`).
+
 ## Getting Started
 
 First, run the development server:
