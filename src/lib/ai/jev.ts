@@ -16,7 +16,7 @@ export type JevQuestionType = 'noul' | 'choice' | 'score' | 'box';
 export interface JevQuestion {
   type: JevQuestionType;
   instructions: string;
-  options?: string[];
+  criteria?: Record<string, string> | string[];
 }
 
 export interface JevUsage {
@@ -134,6 +134,10 @@ export async function isVerifiable(
         type: 'noul',
         instructions:
           'El contenido incluye afirmaciones factuales concretas (cifras, hechos, políticas, declaraciones atribuibles) que pueden contrastarse con evidencia pública, y NO es únicamente opinión, consigna o promesa sin hecho verificable.',
+        criteria: {
+          true: 'Contiene afirmaciones factuales concretas (cifras, hechos, políticas o declaraciones atribuibles) contrastables con evidencia pública.',
+          false: 'Es únicamente opinión, consigna, promesa o comentario general sin hechos concretos que puedan contrastarse.',
+        },
       },
     },
     {
@@ -173,7 +177,11 @@ export async function verifyConsensusVerdict(
         type: 'choice',
         instructions:
           '¿La justificación del veredicto se sostiene con el contenido de la fuente? Responde soportado si se sostiene, parcial si solo en parte, o no_soportado si lo contradice o inventa hechos.',
-        options: ['soportado', 'parcial', 'no_soportado'],
+        criteria: {
+          soportado: 'La justificación se sostiene con el contenido de la fuente y no inventa ni contradice hechos.',
+          parcial: 'La justificación se sostiene solo en parte: algunos elementos tienen respaldo en la fuente y otros no.',
+          no_soportado: 'La justificación contradice el contenido de la fuente o inventa hechos que no aparecen en ella.',
+        },
       },
     },
     {
