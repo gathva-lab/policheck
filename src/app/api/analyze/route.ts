@@ -586,6 +586,11 @@ export async function POST(request: Request) {
       raw && typeof raw === 'object' && !Array.isArray(raw)
         ? {
             ...(raw as Record<string, unknown>),
+            // Válvula: garantiza los campos ciudadanos aunque el modelo los omita.
+            plain_verdict: s.parsed.report?.plainVerdict ?? null,
+            plain_summary: s.parsed.report?.plainSummary ?? null,
+            quotes: s.parsed.report?.quotes ?? null,
+            content_nature: s.parsed.report?.contentNature ?? null,
             source_quality: {
               transcript_used: content.transcriptUsed,
               transcript_words: content.transcriptWords,

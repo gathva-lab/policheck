@@ -8,6 +8,10 @@ function report(partial: Partial<ModelReport>): ModelReport {
     veracityScore: null,
     coherenceScore: null,
     summary: null,
+    plainVerdict: null,
+    plainSummary: null,
+    quotes: null,
+    contentNature: null,
     ...partial,
   };
 }
