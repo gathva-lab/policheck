@@ -1,0 +1,45 @@
+name: Deploy a Cloudflare
+
+# Se dispara al hacer push a dev y main, y también manualmente desde la UI de
+# GitHub (Actions -> Deploy a Cloudflare -> Run workflow).
+on:
+  push:
+    branches: [dev, main]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    name: Build y Deploy del Worker
+    runs-on: ubuntu-latest
+    # Los secretos deben configurarse en:
+    # Settings -> Secrets and variables -> Actions
+    #   - CLOUDFLARE_API_TOKEN
+    #   - CLOUDFLARE_ACCOUNT_ID
+    #   - NEXT_PUBLIC_SUPABASE_URL
+    #   - NEXT_PUBLIC_SUPABASE_ANON_KEY
+    # Los secretos privados del Worker (SUPABASE_SERVICE_ROLE_KEY,
+    # OPENROUTER_API_KEY) ya están cargados vía `wrangler secret`; este workflow
+    # no debe sobreescribirlos.
+    env:
+      NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
+      NEXT_PUBLIC_SUPABASE_ANON_KEY: ${{ secrets.NEXT_PUBLIC_SUPABASE_ANON_KEY }}
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Instalar dependencias
+        run: npm ci
+
+      - name: Build para Cloudflare
+        run: npm run build:cf
+
+      - name: Deploy del Worker
+        run: npx wrangler deploy

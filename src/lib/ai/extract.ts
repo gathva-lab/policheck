@@ -1,6 +1,6 @@
 import * as cheerio from 'cheerio';
 
-const MAX_INPUT_CHARS = 32000;
+const MAX_INPUT_CHARS = 12000;
 const FETCH_TIMEOUT_MS = 15000;
 
 export interface ExtractedContent {

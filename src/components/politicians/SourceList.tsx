@@ -54,7 +54,16 @@ export async function SourceList({ politicianId }: SourceListProps) {
                     <a href={source.url} target="_blank" rel="noopener noreferrer" className="text-blue-500 font-medium hover:underline">
                       {source.title || source.url}
                     </a>
-                    <p className="text-xs text-muted-foreground mt-1">{SOURCE_TYPE_LABEL[source.source_type] ?? "Fuente"}</p>
+                    <p className="text-xs text-muted-foreground mt-1">
+                      {SOURCE_TYPE_LABEL[source.source_type] ?? "Fuente"}
+                      {source.created_at
+                        ? ` · ${new Date(source.created_at).toLocaleDateString("es-CL", {
+                            day: "2-digit",
+                            month: "short",
+                            year: "numeric",
+                          })}`
+                        : ""}
+                    </p>
                   </div>
                   <div className="flex items-center gap-2 flex-wrap justify-end">
                     <span className="text-xs font-semibold px-2 py-1 bg-slate-100 rounded-full">
