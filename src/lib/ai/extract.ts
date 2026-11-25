@@ -3,6 +3,11 @@ import * as cheerio from 'cheerio';
 const MAX_INPUT_CHARS = 12000;
 const FETCH_TIMEOUT_MS = 15000;
 
+export const TRANSCRIPT_TIMEOUT_MS = 10000;
+export const YOUTUBE_EXTRACTION_BUDGET_MS = 25000;
+export const ARTICLE_EXTRACTION_BUDGET_MS = 20000;
+export const MIN_CONTENT_CHARS = 200;
+
 export interface ExtractedContent {
   title: string;
   text: string;
@@ -29,7 +34,36 @@ export function extractDomain(url: string): string {
   }
 }
 
-export async function extractArticle(url: string): Promise<ExtractedContent> {
+async function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(message)), ms);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+export async function fetchTranscript(url: string): Promise<string> {
+  try {
+    const { YoutubeTranscript } = await import('youtube-transcript');
+    const parts = await withTimeout(
+      YoutubeTranscript.fetchTranscript(url),
+      TRANSCRIPT_TIMEOUT_MS,
+      'transcript timeout'
+    );
+    return parts.map((part) => part.text).join(' ');
+  } catch {
+    console.warn('[extract] transcripción no disponible en 10s', url);
+    return '';
+  }
+}
+
+async function extractArticleInner(url: string): Promise<ExtractedContent> {
   const response = await fetch(url, {
     headers: {
       'User-Agent': 'Mozilla/5.0 (compatible; PolicheckBot/1.0; +https://policheck.cl)',
@@ -67,12 +101,17 @@ export async function extractArticle(url: string): Promise<ExtractedContent> {
   };
 }
 
-export async function extractYoutube(url: string): Promise<ExtractedContent> {
+export async function extractArticle(url: string): Promise<ExtractedContent> {
+  return withTimeout(extractArticleInner(url), ARTICLE_EXTRACTION_BUDGET_MS, 'extraccion_timeout');
+}
+
+async function extractYoutubeInner(url: string): Promise<ExtractedContent> {
   let title = 'Video de YouTube';
   let description = '';
 
   try {
     const oembed = await fetch(`https://www.youtube.com/oembed?url=${encodeURIComponent(url)}&format=json`, {
+      redirect: 'follow',
       signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
     });
     if (oembed.ok) {
@@ -86,6 +125,7 @@ export async function extractYoutube(url: string): Promise<ExtractedContent> {
   try {
     const page = await fetch(url, {
       headers: { 'User-Agent': 'Mozilla/5.0 (compatible; PolicheckBot/1.0)' },
+      redirect: 'follow',
       signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
     });
     if (page.ok) {
@@ -100,14 +140,7 @@ export async function extractYoutube(url: string): Promise<ExtractedContent> {
     // No bloqueante
   }
 
-  let transcript = '';
-  try {
-    const { YoutubeTranscript } = await import('youtube-transcript');
-    const parts = await YoutubeTranscript.fetchTranscript(url);
-    transcript = parts.map((p) => p.text).join(' ');
-  } catch {
-    // Transcripción opcional, no bloqueante
-  }
+  const transcript = await fetchTranscript(url);
 
   const transcriptUsed = transcript.trim().length > 0;
   const transcriptWords = transcriptUsed ? transcript.trim().split(/\s+/).length : 0;
@@ -123,4 +156,8 @@ export async function extractYoutube(url: string): Promise<ExtractedContent> {
     transcriptUsed,
     transcriptWords,
   };
+}
+
+export async function extractYoutube(url: string): Promise<ExtractedContent> {
+  return withTimeout(extractYoutubeInner(url), YOUTUBE_EXTRACTION_BUDGET_MS, 'extraccion_timeout');
 }

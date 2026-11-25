@@ -27,6 +27,7 @@ interface SourceVerdict {
     verdict_score: number | null;
     requires_review: boolean;
     status: string | null;
+    analysis_error: string | null;
 }
 
 interface AnalysisResultsProps {
@@ -68,7 +69,7 @@ export function AnalysisResults({ sourceId, politicianId, sourceUrl }: AnalysisR
         const supabase = createClient();
         const [reportsRes, sourceRes] = await Promise.all([
             supabase.from('ai_reports').select('*').eq('source_id', sourceId),
-            supabase.from('sources').select('verdict, verdict_score, requires_review, status').eq('id', sourceId).maybeSingle(),
+            supabase.from('sources').select('verdict, verdict_score, requires_review, status, analysis_error').eq('id', sourceId).maybeSingle(),
         ]);
 
         if (reportsRes.error) {
@@ -82,6 +83,7 @@ export function AnalysisResults({ sourceId, politicianId, sourceUrl }: AnalysisR
                 verdict_score: sourceRes.data.verdict_score ?? null,
                 requires_review: sourceRes.data.requires_review ?? false,
                 status: sourceRes.data.status ?? null,
+                analysis_error: sourceRes.data.analysis_error ?? null,
             }
             : null;
 
@@ -229,12 +231,17 @@ export function AnalysisResults({ sourceId, politicianId, sourceUrl }: AnalysisR
                     <p className="text-sm text-amber-700 dark:text-amber-300">
                         El análisis no se completó o quedó pendiente de revisión. Puedes re-analizar la fuente.
                     </p>
+                    {verdict?.analysis_error && (
+                        <p className="text-xs text-amber-700/80 dark:text-amber-400/80">
+                            {verdict.analysis_error}
+                        </p>
+                    )}
                     {error && <p className="text-sm text-red-600 dark:text-red-400">{error}</p>}
                 </div>
             );
         }
 
-        if (loading && !timedOut) {
+        if (!timedOut && (loading || verdict?.status === 'procesando')) {
             return (
                 <div className="mt-4 text-sm text-yellow-700 bg-yellow-50 p-4 rounded-xl border border-yellow-200 shadow-sm animate-pulse">
                     <div className="flex items-center gap-3">

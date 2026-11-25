@@ -9,6 +9,7 @@ interface SourceListProps {
 
 const STATUS_LABEL: Record<string, string> = {
   no_verificada: "Sin analizar",
+  procesando: "Analizando…",
   verificada: "Verificada",
   requiere_revision: "En revisión",
 };
