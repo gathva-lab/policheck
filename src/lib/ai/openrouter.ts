@@ -188,13 +188,15 @@ export async function callModel(
   apiKey: string,
   systemPrompt: string,
   userContent: string,
-  onFailure?: (reason: CallFailureReason) => void,
+  onFailure?: (reason: CallFailureReason, latencyMs: number) => void,
   options: CallModelOptions = {}
 ): Promise<OpenRouterResult | null> {
   const outcome = await executeCompletion(modelId, apiKey, systemPrompt, userContent, options);
 
   if (outcome.failureReason !== null) {
-    onFailure?.(outcome.failureReason);
+    // Se propaga la latencia real (incluidos los timeouts) para que el cost log
+    // no registre 0 ms en fallos que sí esperaron.
+    onFailure?.(outcome.failureReason, outcome.latencyMs);
     return null;
   }
 
