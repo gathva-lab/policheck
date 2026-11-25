@@ -212,7 +212,16 @@ export async function POST(request: Request) {
   const triplet = activeSorted.slice(0, 3);
 
   if (triplet.length === 0) {
-    await admin.from('sources').update({ status: 'requiere_revision', requires_review: true }).eq('id', sourceId);
+    const { error: noModelsError } = await admin
+      .from('sources')
+      .update({ status: 'requiere_revision', requires_review: true })
+      .eq('id', sourceId);
+    if (noModelsError) {
+      console.error('[analyze] Error marcando fuente sin modelos:', {
+        source_id: sourceId,
+        error: noModelsError,
+      });
+    }
     return NextResponse.json({ error: 'No hay modelos configurados para el análisis' }, { status: 500 });
   }
 
@@ -244,6 +253,18 @@ export async function POST(request: Request) {
     .filter((s): s is PromiseFulfilledResult<SuccessfulCall | null> => s.status === 'fulfilled')
     .map((s) => s.value)
     .filter((v): v is SuccessfulCall => v !== null);
+
+  // Visibilidad de fallos silenciosos: si el modelo respondió pero su salida no
+  // se pudo parsear, se registra cuál falló y una pista del contenido recibido.
+  // `ai_cost_log` aún no tiene columna parse_failed; cuando exista, se registra ahí.
+  for (const s of successes.filter((call) => call.parsed.report === null)) {
+    console.error('[analyze] Falló el parseo de la salida del modelo:', {
+      source_id: sourceId,
+      model_name: s.model,
+      reason: 'La salida no contiene un objeto JSON válido para el reporte',
+      content_preview: s.content.slice(0, 200),
+    });
+  }
 
   const parsedModels = successes.filter((s) => s.parsed.report !== null);
   const reports: ModelReport[] = parsedModels.map((s) => s.parsed.report as ModelReport);
@@ -329,7 +350,10 @@ export async function POST(request: Request) {
     .single();
 
   if (updateError) {
-    console.error('[analyze] Error actualizando fuente:', updateError);
+    console.error('[analyze] Error actualizando fuente:', {
+      source_id: sourceId,
+      error: updateError,
+    });
   }
 
   return NextResponse.json({

@@ -33,7 +33,7 @@ export async function callModel(
           { role: 'user', content: userContent },
         ],
         temperature: 0.2,
-        max_tokens: 2048,
+        max_tokens: 4096,
       }),
       signal: controller.signal,
       cache: 'no-store',
