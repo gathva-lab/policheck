@@ -78,6 +78,11 @@ export async function SourceList({ politicianId }: SourceListProps) {
                         {typeof source.verdict_score === "number" ? ` · ${source.verdict_score}%` : ""}
                       </span>
                     )}
+                    {source.verdict && source.requires_review && source.status !== "requiere_revision" && (
+                      <span className="text-xs font-semibold px-2 py-1 rounded-full bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-300">
+                        En revisión
+                      </span>
+                    )}
                   </div>
                 </div>
 
