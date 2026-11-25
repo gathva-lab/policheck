@@ -59,7 +59,7 @@ function supabaseAdmin() {
 }
 
 export async function POST(request: Request) {
-  let body: { url?: string; politicianId?: string };
+  let body: { url?: string; politicianId?: string; force?: boolean };
   try {
     body = await request.json();
   } catch {
@@ -68,6 +68,7 @@ export async function POST(request: Request) {
 
   const url = body?.url;
   const politicianId = body?.politicianId;
+  const force = body?.force === true;
 
   if (!url || typeof url !== 'string') {
     return NextResponse.json({ error: 'URL es requerida' }, { status: 400 });
@@ -89,13 +90,13 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: 'Debes iniciar sesión para aportar fuentes' }, { status: 401 });
   }
 
-  // Cache: si la URL ya existe en sources, se devuelve sin re-analizar
+  // Cache: si la URL ya existe en sources, se devuelve sin re-analizar (salvo force)
   const { data: existing } = await supabase
     .from('sources')
     .select('*')
     .eq('url', url)
     .maybeSingle();
-  if (existing) {
+  if (existing && !force) {
     return NextResponse.json({ source: existing, cached: true });
   }
 
@@ -117,6 +118,9 @@ export async function POST(request: Request) {
   if (!process.env.SUPABASE_SERVICE_ROLE_KEY) {
     return NextResponse.json({ error: 'Configuración del servidor incompleta' }, { status: 500 });
   }
+  if (!apiKey) {
+    return NextResponse.json({ error: 'OPENROUTER_API_KEY no configurada' }, { status: 500 });
+  }
   const admin = supabaseAdmin();
 
   // 1. Extracción de contenido (artículo o YouTube)
@@ -128,49 +132,74 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: 'No se pudo acceder o procesar la URL' }, { status: 502 });
   }
 
-  // 2. Inferir media_outlet_id desde el dominio de la URL (crear si no existe)
-  const domain = extractDomain(url);
-  let mediaOutletId: string | null = null;
-  const { data: outlet } = await admin.from('media_outlets').select('id').eq('domain', domain).maybeSingle();
-  if (outlet) {
-    mediaOutletId = outlet.id;
-  } else {
-    const { data: newOutlet, error: outletError } = await admin
-      .from('media_outlets')
-      .insert({ domain, name: domain })
-      .select('id')
-      .single();
-    if (!outletError && newOutlet) mediaOutletId = newOutlet.id;
-  }
+  let source: Record<string, unknown>;
+  let sourceId: string;
 
-  // 3. Insertar la fuente
-  const { data: source, error: sourceError } = await admin
-    .from('sources')
-    .insert({
-      url,
-      politician_id: politicianId,
-      source_type: content.sourceType,
-      title: content.title,
-      status: 'no_verificada',
-      submitted_by: user.id,
-      media_outlet_id: mediaOutletId,
-    })
-    .select()
-    .single();
+  if (existing && force) {
+    // Re-análisis: borrar reportes previos y resetear el veredicto antes de volver a analizar
+    source = existing;
+    sourceId = existing.id;
 
-  if (sourceError) {
-    console.error('[analyze] Error insertando fuente:', sourceError);
-    if (sourceError.code === '23505') {
-      return NextResponse.json({ error: 'Esta fuente ya ha sido añadida.' }, { status: 409 });
+    const { error: deleteError } = await admin.from('ai_reports').delete().eq('source_id', sourceId);
+    if (deleteError) {
+      console.error('[analyze] Error borrando ai_reports previos:', deleteError);
+      return NextResponse.json({ error: 'No se pudieron borrar los reportes previos' }, { status: 500 });
     }
-    return NextResponse.json({ error: sourceError.message || 'Error al guardar la fuente.' }, { status: 500 });
-  }
 
-  const sourceId = source.id;
+    const { error: resetError } = await admin
+      .from('sources')
+      .update({
+        verdict: null,
+        verdict_score: null,
+        consensus_agreement: null,
+        requires_review: false,
+      })
+      .eq('id', sourceId);
+    if (resetError) {
+      console.error('[analyze] Error reseteando veredicto:', resetError);
+      return NextResponse.json({ error: 'No se pudo reiniciar el análisis de la fuente' }, { status: 500 });
+    }
+  } else {
+    // 2. Inferir media_outlet_id desde el dominio de la URL (crear si no existe)
+    const domain = extractDomain(url);
+    let mediaOutletId: string | null = null;
+    const { data: outlet } = await admin.from('media_outlets').select('id').eq('domain', domain).maybeSingle();
+    if (outlet) {
+      mediaOutletId = outlet.id;
+    } else {
+      const { data: newOutlet, error: outletError } = await admin
+        .from('media_outlets')
+        .insert({ domain, name: domain })
+        .select('id')
+        .single();
+      if (!outletError && newOutlet) mediaOutletId = newOutlet.id;
+    }
 
-  if (!apiKey) {
-    await admin.from('sources').update({ status: 'requiere_revision', requires_review: true }).eq('id', sourceId);
-    return NextResponse.json({ error: 'OPENROUTER_API_KEY no configurada' }, { status: 500 });
+    // 3. Insertar la fuente
+    const { data: insertedSource, error: sourceError } = await admin
+      .from('sources')
+      .insert({
+        url,
+        politician_id: politicianId,
+        source_type: content.sourceType,
+        title: content.title,
+        status: 'no_verificada',
+        submitted_by: user.id,
+        media_outlet_id: mediaOutletId,
+      })
+      .select()
+      .single();
+
+    if (sourceError) {
+      console.error('[analyze] Error insertando fuente:', sourceError);
+      if (sourceError.code === '23505') {
+        return NextResponse.json({ error: 'Esta fuente ya ha sido añadida.' }, { status: 409 });
+      }
+      return NextResponse.json({ error: sourceError.message || 'Error al guardar la fuente.' }, { status: 500 });
+    }
+
+    source = insertedSource;
+    sourceId = insertedSource.id;
   }
 
   // 4. Leer el triplete activo de ai_model_config (tier free primero) con su fallback
