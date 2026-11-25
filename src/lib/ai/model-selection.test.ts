@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { pickTriplet, type ModelConfigLike } from './model-selection';
+import { buildAttempts, pickTriplet, type ModelConfigLike } from './model-selection';
 
 function config(
   id: string,
@@ -91,5 +91,51 @@ describe('pickTriplet', () => {
 
     expect(triplet).toHaveLength(3);
     expect(triplet.some((c) => c.tier === 'frontier')).toBe(false);
+  });
+});
+
+describe('buildAttempts', () => {
+  it('descarta un fallback inactivo y usa el siguiente activo del mismo tier', () => {
+    const configs: ModelConfigLike[] = [
+      config('free', 'nvidia/nemotron-3-ultra-550b-a55b:free', 'free', true, 50),
+      config('active-a', 'deepseek/deepseek-v4.1-flash', 'eco', true, 10),
+      config('active-b', 'tencent/hy4-flash', 'eco', true, 10),
+      config('inactive', 'deepseek/deepseek-v3.2', 'eco', false, 5),
+      config('next', 'qwen/qwen3-32b', 'eco', true, 20),
+    ];
+
+    const triplet = [
+      configs[0],
+      configs[1],
+      configs[2],
+    ];
+    const tripletWithInactiveFallback = [
+      { ...triplet[0], fallback_id: 'inactive' },
+      triplet[1],
+      triplet[2],
+    ];
+
+    const attempts = buildAttempts(tripletWithInactiveFallback, configs);
+    const attemptedIds = attempts.flat().map((candidate) => candidate.modelId);
+
+    expect(attemptedIds).not.toContain('deepseek/deepseek-v3.2');
+    expect(attempts[0].map((candidate) => candidate.modelId)).toEqual([
+      'nvidia/nemotron-3-ultra-550b-a55b:free',
+      'qwen/qwen3-32b',
+    ]);
+  });
+
+  it('nunca añade un fallback que ya forma parte del triplete', () => {
+    const configs: ModelConfigLike[] = [
+      { ...config('free', 'nvidia/nemotron-3-ultra-550b-a55b:free', 'free', true, 50), fallback_id: 'active-a' },
+      config('active-a', 'deepseek/deepseek-v4.1-flash', 'eco', true, 10),
+      config('active-b', 'tencent/hy4-flash', 'eco', true, 10),
+    ];
+
+    const attempts = buildAttempts(configs, configs);
+
+    expect(attempts[0].map((candidate) => candidate.modelId)).toEqual([
+      'nvidia/nemotron-3-ultra-550b-a55b:free',
+    ]);
   });
 });

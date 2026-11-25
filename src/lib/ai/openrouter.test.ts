@@ -1,0 +1,98 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { callModel } from './openrouter';
+
+function jsonResponse(body: unknown, status = 200): Response {
+  return {
+    status,
+    ok: status >= 200 && status < 300,
+    json: async () => body,
+  } as Response;
+}
+
+describe('callModel', () => {
+  beforeEach(() => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+    vi.useRealTimers();
+  });
+
+  it('desactiva reasoning, usa max_tokens 6000 y marca empty si solo hubo reasoning', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      jsonResponse({
+        choices: [{ message: { content: '', reasoning: 'razonamiento interno' } }],
+        usage: { prompt_tokens: 10, completion_tokens: 0 },
+      })
+    );
+    vi.stubGlobal('fetch', fetchMock);
+
+    const onFailure = vi.fn();
+    const result = await callModel('deepseek/deepseek-v4.1-flash', 'key', 'sistema', 'usuario', onFailure);
+
+    expect(result).toBeNull();
+    expect(onFailure).toHaveBeenCalledWith('empty');
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body as string) as Record<string, unknown>;
+    expect(body.reasoning).toEqual({ enabled: false });
+    expect(body.max_tokens).toBe(6000);
+    expect(console.warn).toHaveBeenCalledWith(expect.stringContaining('razonó sin emitir respuesta'));
+  });
+
+  it('clasifica HTTP 402 como falta de crédito', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse({}, 402)));
+
+    const onFailure = vi.fn();
+    const result = await callModel('modelo/x', 'key', 'sistema', 'usuario', onFailure);
+
+    expect(result).toBeNull();
+    expect(onFailure).toHaveBeenCalledWith('http_402');
+  });
+
+  it('clasifica otros 4xx como http_4xx', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse({}, 404)));
+
+    const onFailure = vi.fn();
+    const result = await callModel('modelo/x', 'key', 'sistema', 'usuario', onFailure);
+
+    expect(result).toBeNull();
+    expect(onFailure).toHaveBeenCalledWith('http_4xx');
+  });
+
+  it('reintenta una sola vez con backoff en HTTP 429', async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse({}, 429))
+      .mockResolvedValueOnce(
+        jsonResponse({
+          choices: [{ message: { content: '{"ok":true}' } }],
+          usage: { prompt_tokens: 1, completion_tokens: 1 },
+        })
+      );
+    vi.stubGlobal('fetch', fetchMock);
+
+    const promise = callModel('modelo/x', 'key', 'sistema', 'usuario');
+    await vi.advanceTimersByTimeAsync(1500);
+    const result = await promise;
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(result?.content).toBe('{"ok":true}');
+  });
+
+  it('si el reintento de 429 también falla, usa http_429', async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({}, 429));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const onFailure = vi.fn();
+    const promise = callModel('modelo/x', 'key', 'sistema', 'usuario', onFailure);
+    await vi.advanceTimersByTimeAsync(1500);
+    const result = await promise;
+
+    expect(result).toBeNull();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(onFailure).toHaveBeenCalledWith('http_429');
+  });
+});

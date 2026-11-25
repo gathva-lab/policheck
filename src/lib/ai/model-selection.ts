@@ -8,6 +8,11 @@ export interface ModelConfigLike {
   priority?: number | null;
 }
 
+export interface AttemptCandidate {
+  modelId: string;
+  tier: string;
+}
+
 const ECO_FAMILIES = ['deepseek', 'qwen', 'llama'] as const;
 const DEFAULT_PRIORITY = 100;
 
@@ -87,4 +92,47 @@ export function pickTriplet<T extends ModelConfigLike>(configs: T[]): T[] {
   }
 
   return selected;
+}
+
+/**
+ * Construye los intentos por cada modelo del triplete: primero el principal y,
+ * si tiene fallback activo, el fallback. Un fallback inactivo se descarta y se
+ * busca el siguiente modelo activo del mismo tier que no esté ya en el triplete,
+ * ordenado por prioridad.
+ */
+export function buildAttempts<T extends ModelConfigLike>(
+  triplet: T[],
+  configs: T[]
+): AttemptCandidate[][] {
+  const configById = new Map(configs.map((config) => [config.id, config]));
+  const tripletModelIds = new Set(triplet.map((config) => config.model_id));
+
+  return triplet.map((config) => {
+    const list: AttemptCandidate[] = [{ modelId: config.model_id, tier: config.tier }];
+    const configured = config.fallback_id ? configById.get(config.fallback_id) : undefined;
+
+    let chosen: T | undefined;
+    if (configured?.is_active && configured.model_id && !tripletModelIds.has(configured.model_id)) {
+      chosen = configured;
+    } else if (configured) {
+      // Fallback inactivo (o ya presente en el triplete): siguiente activo del
+      // mismo tier fuera del triplete, ordenado por prioridad.
+      const tier = configured.tier ?? config.tier;
+      chosen = sortCandidates(
+        configs.filter(
+          (candidate) =>
+            candidate.is_active &&
+            candidate.tier === tier &&
+            candidate.model_id !== config.model_id &&
+            !tripletModelIds.has(candidate.model_id)
+        )
+      )[0];
+    }
+
+    if (chosen && chosen.model_id && !list.some((candidate) => candidate.modelId === chosen.model_id)) {
+      list.push({ modelId: chosen.model_id, tier: chosen.tier });
+    }
+
+    return list;
+  });
 }
