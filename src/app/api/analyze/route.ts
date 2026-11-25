@@ -10,7 +10,7 @@ import {
   type ExtractedContent,
 } from '@/lib/ai/extract';
 import { FEVER_SYSTEM_PROMPT } from '@/lib/ai/prompt';
-import { callModel, type OpenRouterResult } from '@/lib/ai/openrouter';
+import { callModel, type CallFailureReason, type OpenRouterResult } from '@/lib/ai/openrouter';
 import { parseModelOutput, type ParsedAnalysis } from '@/lib/ai/parse';
 import { computeConsensus, type ModelReport } from '@/lib/consensus';
 import { pickTriplet } from '@/lib/ai/model-selection';
@@ -65,6 +65,11 @@ interface ModelConfigRow {
 interface SuccessfulCall extends OpenRouterResult {
   tier: string;
   parsed: ParsedAnalysis;
+}
+
+interface AttemptOutcome {
+  call: SuccessfulCall | null;
+  failureReason: CallFailureReason | null;
 }
 
 function claimsToArray(raw: unknown): string[] | null {
@@ -453,27 +458,45 @@ export async function POST(request: Request) {
     return list;
   });
 
-  // 5. Llamada multi-modelo en paralelo con fallback por modelo
+  // 5. Llamada multi-modelo en paralelo con fallback por modelo.
+  // Cada intento conserva el motivo si no llega a producir un reporte.
   const settled = await Promise.allSettled(
-    attempts.map(async (candidates) => {
+    attempts.map(async (candidates): Promise<AttemptOutcome> => {
+      let failureReason: CallFailureReason | null = null;
       for (const candidate of candidates) {
-        const result = await callModel(candidate.modelId, apiKey, FEVER_SYSTEM_PROMPT, content.text);
+        let candidateFailure: CallFailureReason | null = null;
+        const result = await callModel(
+          candidate.modelId,
+          apiKey,
+          FEVER_SYSTEM_PROMPT,
+          content.text,
+          (reason) => {
+            candidateFailure = reason;
+          }
+        );
         if (result) {
-          return { ...result, tier: candidate.tier, parsed: parseModelOutput(result.model, result.content) };
+          const parsed = parseModelOutput(result.model, result.content);
+          return {
+            call: { ...result, tier: candidate.tier, parsed },
+            failureReason: parsed.report === null ? 'parse_failed' : null,
+          };
         }
+        failureReason = candidateFailure ?? 'http_error';
       }
-      return null;
+      return { call: null, failureReason };
     })
   );
 
-  const successes: SuccessfulCall[] = settled
-    .filter((s): s is PromiseFulfilledResult<SuccessfulCall | null> => s.status === 'fulfilled')
-    .map((s) => s.value)
-    .filter((v): v is SuccessfulCall => v !== null);
+  const outcomes: AttemptOutcome[] = settled.map((s) =>
+    s.status === 'fulfilled' ? s.value : { call: null, failureReason: 'http_error' }
+  );
+
+  const successes: SuccessfulCall[] = outcomes
+    .map((outcome) => outcome.call)
+    .filter((call): call is SuccessfulCall => call !== null);
 
   // Visibilidad de fallos silenciosos: si el modelo respondió pero su salida no
   // se pudo parsear, se registra cuál falló y una pista del contenido recibido.
-  // `ai_cost_log` aún no tiene columna parse_failed; cuando exista, se registra ahí.
   for (const s of successes.filter((call) => call.parsed.report === null)) {
     console.error('[analyze] Falló el parseo de la salida del modelo:', {
       source_id: sourceId,
@@ -481,6 +504,41 @@ export async function POST(request: Request) {
       reason: 'La salida no contiene un objeto JSON válido para el reporte',
       content_preview: s.content.slice(0, 200),
     });
+  }
+
+  // 5b. Diagnóstico: todo modelo del triplete que no produjo reporte deja una
+  // fila en ai_cost_log con coste cero y el motivo del fallo.
+  for (let index = 0; index < outcomes.length; index += 1) {
+    const outcome = outcomes[index];
+    if (outcome.call && outcome.call.parsed.report !== null) continue;
+
+    const primary = attempts[index]?.[0];
+    if (!primary) continue;
+    const reason = outcome.failureReason ?? 'http_error';
+
+    console.error('[analyze] Modelo sin reporte:', {
+      source_id: sourceId,
+      model_id: primary.modelId,
+      reason,
+    });
+
+    const { error: failedCostError } = await admin.from('ai_cost_log').insert({
+      source_id: sourceId,
+      model_id: primary.modelId,
+      input_tokens: 0,
+      output_tokens: 0,
+      cost_usd: 0,
+      latency_ms: 0,
+      tier: primary.tier,
+      error_reason: reason,
+    });
+    if (failedCostError) {
+      console.error('[analyze] Error insertando ai_cost_log de modelo fallido:', {
+        source_id: sourceId,
+        model_id: primary.modelId,
+        error: failedCostError,
+      });
+    }
   }
 
   const parsedModels = successes.filter((s) => s.parsed.report !== null);

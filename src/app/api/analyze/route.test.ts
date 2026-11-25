@@ -4,6 +4,7 @@ const h = vi.hoisted(() => {
   type Chain = Record<string, (...args: unknown[]) => unknown>;
 
   const updates: Array<{ table: string; values: Record<string, unknown> }> = [];
+  const inserts: Array<{ table: string; values: Record<string, unknown> }> = [];
 
   function result(table: string, methods: string[]): unknown {
     const has = (method: string) => methods.includes(method);
@@ -16,7 +17,16 @@ const h = vi.hoisted(() => {
       return { data: null, error: null };
     }
     if (table === 'media_outlets') return { data: { id: 'outlet-1' }, error: null };
-    if (table === 'ai_model_config') return { data: [], error: null };
+    if (table === 'ai_model_config') {
+      return {
+        data: [
+          { id: 'free', model_id: 'nvidia/nemotron-3-ultra-550b-a55b:free', tier: 'free', is_active: true, priority: 50, fallback_id: null },
+          { id: 'deepseek', model_id: 'deepseek/deepseek-v4.1-flash', tier: 'eco', is_active: true, priority: 10, fallback_id: null },
+          { id: 'tencent', model_id: 'tencent/hy4-flash', tier: 'eco', is_active: true, priority: 10, fallback_id: null },
+        ],
+        error: null,
+      };
+    }
     if (table === 'ai_reports') return { data: [], error: null, count: 0 };
     if (table === 'ai_cost_log') return { error: null };
     return { data: null, error: null };
@@ -29,6 +39,7 @@ const h = vi.hoisted(() => {
       target[name] = (...args: unknown[]) => {
         methods.push(name);
         if (name === 'update') updates.push({ table, values: args[0] as Record<string, unknown> });
+        if (name === 'insert') inserts.push({ table, values: args[0] as Record<string, unknown> });
         return target;
       };
     }
@@ -40,6 +51,7 @@ const h = vi.hoisted(() => {
 
   return {
     updates,
+    inserts,
     chain,
     extractArticle: vi.fn(),
     extractYoutube: vi.fn(),
@@ -119,5 +131,64 @@ describe('/api/analyze validación de contenido mínimo', () => {
           update.values.requires_review === true
       )
     ).toBe(true);
+  });
+});
+
+describe('/api/analyze diagnóstico de modelos sin reporte', () => {
+  it('registra error_reason timeout, empty y parse_failed con coste cero', async () => {
+    process.env.OPENROUTER_API_KEY = 'test-key';
+    process.env.SUPABASE_SERVICE_ROLE_KEY = 'test-service-role';
+    process.env.NEXT_PUBLIC_SUPABASE_URL = 'https://supabase.test';
+
+    h.inserts.length = 0;
+    h.callModel.mockReset();
+    h.isVerifiable.mockReset();
+    h.verifyConsensusVerdict.mockReset();
+    h.extractArticle.mockReset();
+    h.extractArticle.mockResolvedValue({
+      title: 'Nota',
+      text: 'contenido factual suficiente '.repeat(20),
+      sourceType: 'articulo_noticia',
+      transcriptUsed: false,
+      transcriptWords: 0,
+    });
+    h.isVerifiable.mockResolvedValue(null);
+    h.verifyConsensusVerdict.mockResolvedValue(null);
+    h.callModel.mockImplementation(async (
+      modelId: string,
+      _apiKey: string,
+      _prompt: string,
+      _content: string,
+      onFailure?: (reason: string) => void
+    ) => {
+      if (modelId === 'nvidia/nemotron-3-ultra-550b-a55b:free') {
+        onFailure?.('timeout');
+        return null;
+      }
+      if (modelId === 'deepseek/deepseek-v4.1-flash') {
+        onFailure?.('empty');
+        return null;
+      }
+      return { model: modelId, content: 'esto no es JSON', inputTokens: 10, outputTokens: 5, latencyMs: 1 };
+    });
+
+    const { POST } = await import('@/app/api/analyze/route');
+    const request = new Request('http://localhost/api/analyze', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url: 'https://ejemplo.cl/nota', politicianId: 'politico-1' }),
+    });
+
+    await POST(request);
+
+    const failureRows = h.inserts
+      .filter((insert) => insert.table === 'ai_cost_log')
+      .map((insert) => insert.values)
+      .filter((values) => typeof values.error_reason === 'string');
+
+    expect(failureRows).toHaveLength(3);
+    expect(failureRows.map((row) => row.error_reason).sort()).toEqual(['empty', 'parse_failed', 'timeout']);
+    expect(failureRows.every((row) => row.cost_usd === 0)).toBe(true);
+    expect(failureRows.every((row) => row.input_tokens === 0 && row.output_tokens === 0)).toBe(true);
   });
 });

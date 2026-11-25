@@ -181,6 +181,29 @@ describe('verifyConsensusVerdict', () => {
     expect(result?.choice).toBe('no_soportado');
     expect(result?.confidence).toBe(0.85);
   });
+
+  it('verifica con el texto completo: 20.000 chars se trocean a 12.000 (inicio y final)', async () => {
+    h.fetchMock.mockResolvedValue(
+      mockJson({
+        soporte: {
+          choice: 'soportado',
+          confidence: 0.9,
+          probabilities: { soportado: 0.9, parcial: 0.05, no_soportado: 0.05 },
+        },
+        usage: { input_tokens: 300 },
+      })
+    );
+
+    const longText = `INICIO-${'a'.repeat(19980)}-FINAL`;
+    await verifyConsensusVerdict('verdadero', 80, 'Justificación', longText, 'api-key');
+
+    const body = JSON.parse(h.fetchMock.mock.calls[0][1].body as string) as {
+      state: { extracto: string };
+    };
+    expect(body.state.extracto).toHaveLength(12000);
+    expect(body.state.extracto.startsWith('INICIO-')).toBe(true);
+    expect(body.state.extracto.endsWith('-FINAL')).toBe(true);
+  });
 });
 
 describe('/api/analyze con filtro JEV', () => {

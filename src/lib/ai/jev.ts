@@ -10,6 +10,25 @@ export const JEV_OUTPUT_FREE = true;
 const JEV_TIMEOUT_MS = 8000;
 const JEV_VERIFIABLE_THRESHOLD = 0.35;
 const JEV_EXCERPT_CHARS = 6000;
+// La verificación post-consenso usa el texto completo que vieron los modelos,
+// recortado a este máximo. Fuentes más largas se trocean (inicio y final).
+export const JEV_VERIFICATION_MAX_CHARS = 12000;
+
+const OMITTED_MARKER = '\n\n[...contenido omitido...]\n\n';
+
+/**
+ * Prepara el texto de verificación: si supera el máximo, conserva el inicio y el
+ * final en lugar de truncar solo el comienzo, para no perder la conclusión.
+ */
+export function buildVerificationText(text: string, maxChars = JEV_VERIFICATION_MAX_CHARS): string {
+  const clean = text ?? '';
+  if (clean.length <= maxChars) return clean;
+
+  const budget = Math.max(0, maxChars - OMITTED_MARKER.length);
+  const headLength = Math.ceil(budget / 2);
+  const tailLength = budget - headLength;
+  return clean.slice(0, headLength) + OMITTED_MARKER + clean.slice(clean.length - tailLength);
+}
 
 export type JevQuestionType = 'noul' | 'choice' | 'score' | 'box';
 
@@ -167,7 +186,7 @@ export async function verifyConsensusVerdict(
   verdictLabel: string | null,
   verdictScore: number | null,
   summary: string | null,
-  extracto: string,
+  verificationText: string,
   apiKey: string,
   timeoutMs: number = JEV_TIMEOUT_MS
 ): Promise<ConsensusVerification | null> {
@@ -185,7 +204,7 @@ export async function verifyConsensusVerdict(
       },
     },
     {
-      extracto: (extracto ?? '').slice(0, JEV_EXCERPT_CHARS),
+      extracto: buildVerificationText(verificationText),
       veredicto: verdictLabel ?? 'desconocido',
       puntaje: verdictScore,
       justificacion: summary ?? '',
