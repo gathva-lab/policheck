@@ -40,7 +40,7 @@ export async function SourceList({ politicianId }: SourceListProps) {
                 </div>
 
                 {/* Visualizador de Reportes IA en tiempo real */}
-                <AnalysisResults sourceId={source.id} />
+                <AnalysisResults sourceId={source.id} politicianId={politicianId} sourceUrl={source.url} />
               </li>
             ))}
           </ul>
