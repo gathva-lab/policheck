@@ -7,6 +7,7 @@ import { callModel, type OpenRouterResult } from '@/lib/ai/openrouter';
 import { parseModelOutput, type ParsedAnalysis } from '@/lib/ai/parse';
 import { computeConsensus, type ModelReport } from '@/lib/consensus';
 import { pickTriplet } from '@/lib/ai/model-selection';
+import { normalizeUrl } from '@/lib/url';
 import {
   isVerifiable,
   verifyConsensusVerdict,
@@ -144,16 +145,24 @@ async function saveJevToReports(
 }
 
 export async function POST(request: Request) {
-  let body: { url?: string; politicianId?: string; force?: boolean };
-  try {
-    body = await request.json();
-  } catch {
-    return NextResponse.json({ error: 'Cuerpo JSON inválido' }, { status: 400 });
-  }
+  // Toda la petición vive dentro del try para garantizar que una fuente nunca
+  // quede colgada en `no_verificada` si el análisis falla a mitad de camino.
+  let sourceId: string | null = null;
+  let url: string | undefined;
+  let etapa = 'extraccion';
+  const startedAt = Date.now();
 
-  const url = body?.url;
-  const politicianId = body?.politicianId;
-  const force = body?.force === true;
+  try {
+    let body: { url?: string; politicianId?: string; force?: boolean };
+    try {
+      body = await request.json();
+    } catch {
+      return NextResponse.json({ error: 'Cuerpo JSON inválido' }, { status: 400 });
+    }
+
+    url = body?.url;
+    const politicianId = body?.politicianId;
+    const force = body?.force === true;
 
   if (!url || typeof url !== 'string') {
     return NextResponse.json({ error: 'URL es requerida' }, { status: 400 });
@@ -167,6 +176,8 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: 'URL inválida' }, { status: 400 });
   }
 
+  const normalizedUrl = normalizeUrl(url);
+
   const supabase = await createClient();
   const {
     data: { user },
@@ -175,11 +186,12 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: 'Debes iniciar sesión para aportar fuentes' }, { status: 401 });
   }
 
-  // Cache: si la URL ya existe en sources, se devuelve sin re-analizar (salvo force)
+  // Cache: se compara siempre contra la URL normalizada para que las variantes
+  // de YouTube (youtu.be, shorts, embed, parámetros ?si=) cuenten como la misma.
   const { data: existing } = await supabase
     .from('sources')
     .select('*')
-    .eq('url', url)
+    .eq('url', normalizedUrl)
     .maybeSingle();
   if (existing && !force) {
     return NextResponse.json({ source: existing, cached: true });
@@ -211,14 +223,13 @@ export async function POST(request: Request) {
   // 1. Extracción de contenido (artículo o YouTube)
   let content: ExtractedContent;
   try {
-    content = isYoutubeUrl(url) ? await extractYoutube(url) : await extractArticle(url);
+    content = isYoutubeUrl(normalizedUrl) ? await extractYoutube(normalizedUrl) : await extractArticle(normalizedUrl);
   } catch (error) {
     console.error('[analyze] Error de extracción:', error);
     return NextResponse.json({ error: 'No se pudo acceder o procesar la URL' }, { status: 502 });
   }
 
   let source: Record<string, unknown>;
-  let sourceId: string;
 
   if (existing && force) {
     // Re-análisis: borrar reportes previos y resetear el veredicto antes de volver a analizar
@@ -264,7 +275,7 @@ export async function POST(request: Request) {
     const { data: insertedSource, error: sourceError } = await admin
       .from('sources')
       .insert({
-        url,
+        url: normalizedUrl,
         politician_id: politicianId,
         source_type: content.sourceType,
         title: content.title,
@@ -287,6 +298,11 @@ export async function POST(request: Request) {
     sourceId = insertedSource.id;
   }
 
+  if (!sourceId) {
+    throw new Error('No se pudo determinar el identificador de la fuente');
+  }
+
+  etapa = 'filtro_jev';
   // 4. Filtro previo de JEV: el contenido no verificable se descarta sin gastar
   // tokens de LLM. Si JEV falla (null) se continúa sin filtro (fail-open).
   const verifiable = await isVerifiable(content.text, content.title, apiKey);
@@ -325,6 +341,7 @@ export async function POST(request: Request) {
     });
   }
 
+  etapa = 'modelos';
   // 5. Componer el triplete activo: 1 free + 2 eco (familias distintas).
   // Frontier queda solo como último recurso y no está activo por defecto.
   const { data: configs } = await admin.from('ai_model_config').select('*');
@@ -390,6 +407,7 @@ export async function POST(request: Request) {
   const parsedModels = successes.filter((s) => s.parsed.report !== null);
   const reports: ModelReport[] = parsedModels.map((s) => s.parsed.report as ModelReport);
 
+  etapa = 'persistencia';
   // 6. Persistir reportes por modelo + costos
   let reportInserts = 0;
   let reportInsertFailures = 0;
@@ -472,9 +490,11 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: 'No se pudo guardar ningún reporte de análisis' }, { status: 500 });
   }
 
+  etapa = 'consenso';
   // 8. Consenso entre modelos
   const consensus = computeConsensus(reports, MIN_VALID_MODELS);
 
+  etapa = 'verificacion_jev';
   // 9. Verificación del consenso con JEV. Solo puede agravar el veredicto a
   // revisión, nunca mejorarlo.
   let finalRequiresReview = consensus.requiresReview;
@@ -508,6 +528,7 @@ export async function POST(request: Request) {
     await saveJevToReports(admin, sourceId, jevVerification);
   }
 
+  etapa = 'persistencia';
   const { data: updatedSource, error: updateError } = await admin
     .from('sources')
     .update({
@@ -528,10 +549,68 @@ export async function POST(request: Request) {
     });
   }
 
-  return NextResponse.json({
-    source: updatedSource ?? source,
-    consensus,
-    jevVerification,
-    analyzedBy: parsedModels.length,
-  });
+    return NextResponse.json({
+      source: updatedSource ?? source,
+      consensus,
+      jevVerification,
+      analyzedBy: parsedModels.length,
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Error desconocido';
+    console.error('[analyze] Error en el análisis:', {
+      source_id: sourceId,
+      url,
+      etapa,
+      error: message,
+    });
+
+    if (sourceId) {
+      const { error: reviewError } = await supabaseAdmin()
+        .from('sources')
+        .update({ status: 'requiere_revision', requires_review: true })
+        .eq('id', sourceId);
+      if (reviewError) {
+        console.error('[analyze] Error marcando fuente requiere_revision en catch:', {
+          source_id: sourceId,
+          error: reviewError,
+        });
+      }
+    }
+
+    return NextResponse.json(
+      { error: message || 'Error interno al analizar la fuente', source_id: sourceId },
+      { status: 500 }
+    );
+  } finally {
+    // Red de seguridad: si la fuente quedó creada sin veredicto ni reportes,
+    // nunca se deja en `no_verificada`; pasa a revisión.
+    if (sourceId) {
+      try {
+        const admin = supabaseAdmin();
+        const [{ data: currentSource }, { count }] = await Promise.all([
+          admin.from('sources').select('status').eq('id', sourceId).maybeSingle(),
+          admin.from('ai_reports').select('id', { count: 'exact', head: true }).eq('source_id', sourceId),
+        ]);
+        if (currentSource?.status === 'no_verificada' && (count ?? 0) === 0) {
+          const { error: reviewError } = await admin
+            .from('sources')
+            .update({ status: 'requiere_revision', requires_review: true })
+            .eq('id', sourceId);
+          if (reviewError) {
+            console.error('[analyze] Error marcando fuente requiere_revision en finally:', {
+              source_id: sourceId,
+              error: reviewError,
+            });
+          }
+        }
+      } catch (finallyError) {
+        console.error('[analyze] Error en la verificación final de la fuente:', {
+          source_id: sourceId,
+          error: finallyError instanceof Error ? finallyError.message : finallyError,
+        });
+      }
+    }
+
+    console.log('[analyze] duración total', Date.now() - startedAt, 'ms');
+  }
 }

@@ -1,5 +1,5 @@
 const OPENROUTER_URL = 'https://openrouter.ai/api/v1/chat/completions';
-const MODEL_TIMEOUT_MS = 90000;
+const MODEL_TIMEOUT_MS = 45000;
 
 export interface OpenRouterResult {
   model: string;

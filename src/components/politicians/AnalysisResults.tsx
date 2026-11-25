@@ -26,6 +26,7 @@ interface SourceVerdict {
     verdict: string | null;
     verdict_score: number | null;
     requires_review: boolean;
+    status: string | null;
 }
 
 interface AnalysisResultsProps {
@@ -67,7 +68,7 @@ export function AnalysisResults({ sourceId, politicianId, sourceUrl }: AnalysisR
         const supabase = createClient();
         const [reportsRes, sourceRes] = await Promise.all([
             supabase.from('ai_reports').select('*').eq('source_id', sourceId),
-            supabase.from('sources').select('verdict, verdict_score, requires_review').eq('id', sourceId).maybeSingle(),
+            supabase.from('sources').select('verdict, verdict_score, requires_review, status').eq('id', sourceId).maybeSingle(),
         ]);
 
         if (reportsRes.error) {
@@ -80,6 +81,7 @@ export function AnalysisResults({ sourceId, politicianId, sourceUrl }: AnalysisR
                 verdict: sourceRes.data.verdict ?? null,
                 verdict_score: sourceRes.data.verdict_score ?? null,
                 requires_review: sourceRes.data.requires_review ?? false,
+                status: sourceRes.data.status ?? null,
             }
             : null;
 
@@ -91,7 +93,10 @@ export function AnalysisResults({ sourceId, politicianId, sourceUrl }: AnalysisR
             setVerdict(sourceVerdict);
         }
 
-        const done = fetchedReports.length > 0 || (sourceVerdict?.verdict ?? null) !== null;
+        const done =
+            fetchedReports.length > 0 ||
+            (sourceVerdict?.verdict ?? null) !== null ||
+            sourceVerdict?.status === 'requiere_revision';
         return { done, verdict: sourceVerdict };
     }, [sourceId]);
 
@@ -205,6 +210,26 @@ export function AnalysisResults({ sourceId, politicianId, sourceUrl }: AnalysisR
                         <Activity className="h-5 w-5 animate-spin text-yellow-600" />
                         <span className="font-semibold">Re-analizando fuente con Múltiples Motores de IA... (Esto puede tardar hasta 1 minuto)</span>
                     </div>
+                </div>
+            );
+        }
+
+        if (verdict?.status === 'requiere_revision' || verdict?.requires_review) {
+            return (
+                <div className="mt-4 p-5 border rounded-2xl bg-amber-50 dark:bg-amber-950/20 border-amber-200 dark:border-amber-800/50 space-y-4">
+                    <div className="flex items-center justify-between gap-3 flex-wrap">
+                        <div className="flex items-center gap-2">
+                            <span className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-300 text-sm font-semibold">
+                                <Activity className="h-4 w-4" />
+                                En revisión
+                            </span>
+                        </div>
+                        <ReanalyzeButton onClick={handleReanalyze} loading={reanalyzing} />
+                    </div>
+                    <p className="text-sm text-amber-700 dark:text-amber-300">
+                        El análisis no se completó o quedó pendiente de revisión. Puedes re-analizar la fuente.
+                    </p>
+                    {error && <p className="text-sm text-red-600 dark:text-red-400">{error}</p>}
                 </div>
             );
         }
