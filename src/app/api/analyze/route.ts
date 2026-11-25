@@ -1,7 +1,14 @@
 import { NextResponse } from 'next/server';
 import { createClient as createAdminClient } from '@supabase/supabase-js';
 import { createClient } from '@/utils/supabase/server';
-import { extractArticle, extractYoutube, extractDomain, isYoutubeUrl, type ExtractedContent } from '@/lib/ai/extract';
+import {
+  extractArticle,
+  extractYoutube,
+  extractDomain,
+  isYoutubeUrl,
+  MIN_CONTENT_CHARS,
+  type ExtractedContent,
+} from '@/lib/ai/extract';
 import { FEVER_SYSTEM_PROMPT } from '@/lib/ai/prompt';
 import { callModel, type OpenRouterResult } from '@/lib/ai/openrouter';
 import { parseModelOutput, type ParsedAnalysis } from '@/lib/ai/parse';
@@ -220,15 +227,9 @@ export async function POST(request: Request) {
   }
   const admin = supabaseAdmin();
 
-  // 1. Extracción de contenido (artículo o YouTube)
-  let content: ExtractedContent;
-  try {
-    content = isYoutubeUrl(normalizedUrl) ? await extractYoutube(normalizedUrl) : await extractArticle(normalizedUrl);
-  } catch (error) {
-    console.error('[analyze] Error de extracción:', error);
-    return NextResponse.json({ error: 'No se pudo acceder o procesar la URL' }, { status: 502 });
-  }
-
+  // La fuente se crea o resetea antes de extraer para poder registrar el inicio
+  // del análisis y marcarla aunque la extracción falle o se agote.
+  const startedAtIso = new Date().toISOString();
   let source: Record<string, unknown>;
 
   if (existing && force) {
@@ -249,6 +250,11 @@ export async function POST(request: Request) {
         verdict_score: null,
         consensus_agreement: null,
         requires_review: false,
+        status: 'procesando',
+        analysis_stage: 'extraccion',
+        analysis_started_at: startedAtIso,
+        analysis_finished_at: null,
+        analysis_error: null,
       })
       .eq('id', sourceId);
     if (resetError) {
@@ -271,15 +277,17 @@ export async function POST(request: Request) {
       if (!outletError && newOutlet) mediaOutletId = newOutlet.id;
     }
 
-    // 3. Insertar la fuente
+    // 3. Insertar la fuente en estado `procesando`
     const { data: insertedSource, error: sourceError } = await admin
       .from('sources')
       .insert({
         url: normalizedUrl,
         politician_id: politicianId,
-        source_type: content.sourceType,
-        title: content.title,
-        status: 'no_verificada',
+        source_type: isYoutubeUrl(normalizedUrl) ? 'video_youtube' : 'articulo_noticia',
+        title: normalizedUrl,
+        status: 'procesando',
+        analysis_stage: 'extraccion',
+        analysis_started_at: startedAtIso,
         submitted_by: user.id,
         media_outlet_id: mediaOutletId,
       })
@@ -302,7 +310,69 @@ export async function POST(request: Request) {
     throw new Error('No se pudo determinar el identificador de la fuente');
   }
 
+  const activeSourceId = sourceId;
+  const setStage = async (stage: string) => {
+    const { error: stageError } = await admin
+      .from('sources')
+      .update({ analysis_stage: stage })
+      .eq('id', activeSourceId);
+    if (stageError) {
+      console.error('[analyze] Error actualizando analysis_stage:', {
+        source_id: activeSourceId,
+        stage,
+        error: stageError,
+      });
+    }
+  };
+
+  etapa = 'extraccion';
+  // 1. Extracción de contenido (artículo o YouTube)
+  let content: ExtractedContent;
+  try {
+    content = isYoutubeUrl(normalizedUrl) ? await extractYoutube(normalizedUrl) : await extractArticle(normalizedUrl);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Error de extracción';
+    console.error('[analyze] Error de extracción:', error);
+    await admin
+      .from('sources')
+      .update({
+        status: 'requiere_revision',
+        requires_review: true,
+        analysis_error: message,
+        analysis_finished_at: new Date().toISOString(),
+      })
+      .eq('id', activeSourceId);
+    return NextResponse.json(
+      { error: 'No se pudo acceder o procesar la URL', source_id: activeSourceId },
+      { status: 502 }
+    );
+  }
+
+  await admin
+    .from('sources')
+    .update({ title: content.title, source_type: content.sourceType })
+    .eq('id', activeSourceId);
+
+  etapa = 'contenido';
+  await setStage('contenido');
+
+  const chars = content.text.trim().length;
+  if (chars < MIN_CONTENT_CHARS) {
+    const errorMessage = 'No se pudo extraer contenido suficiente de la fuente';
+    await admin
+      .from('sources')
+      .update({
+        status: 'requiere_revision',
+        requires_review: true,
+        analysis_error: errorMessage,
+        analysis_finished_at: new Date().toISOString(),
+      })
+      .eq('id', activeSourceId);
+    return NextResponse.json({ error: errorMessage, source_id: activeSourceId, chars }, { status: 422 });
+  }
+
   etapa = 'filtro_jev';
+  await setStage('filtro_jev');
   // 4. Filtro previo de JEV: el contenido no verificable se descarta sin gastar
   // tokens de LLM. Si JEV falla (null) se continúa sin filtro (fail-open).
   const verifiable = await isVerifiable(content.text, content.title, apiKey);
@@ -316,6 +386,9 @@ export async function POST(request: Request) {
         verdict_score: 0,
         consensus_agreement: 1,
         requires_review: false,
+        analysis_stage: 'completo',
+        analysis_finished_at: new Date().toISOString(),
+        analysis_error: null,
       };
       const { data: skippedSource, error: skipError } = await admin
         .from('sources')
@@ -342,6 +415,7 @@ export async function POST(request: Request) {
   }
 
   etapa = 'modelos';
+  await setStage('modelos');
   // 5. Componer el triplete activo: 1 free + 2 eco (familias distintas).
   // Frontier queda solo como último recurso y no está activo por defecto.
   const { data: configs } = await admin.from('ai_model_config').select('*');
@@ -352,7 +426,12 @@ export async function POST(request: Request) {
   if (triplet.length === 0) {
     const { error: noModelsError } = await admin
       .from('sources')
-      .update({ status: 'requiere_revision', requires_review: true })
+      .update({
+        status: 'requiere_revision',
+        requires_review: true,
+        analysis_error: 'No hay modelos configurados para el análisis',
+        analysis_finished_at: new Date().toISOString(),
+      })
       .eq('id', sourceId);
     if (noModelsError) {
       console.error('[analyze] Error marcando fuente sin modelos:', {
@@ -491,10 +570,12 @@ export async function POST(request: Request) {
   }
 
   etapa = 'consenso';
+  await setStage('consenso');
   // 8. Consenso entre modelos
   const consensus = computeConsensus(reports, MIN_VALID_MODELS);
 
   etapa = 'verificacion_jev';
+  await setStage('verificacion_jev');
   // 9. Verificación del consenso con JEV. Solo puede agravar el veredicto a
   // revisión, nunca mejorarlo.
   let finalRequiresReview = consensus.requiresReview;
@@ -529,6 +610,7 @@ export async function POST(request: Request) {
   }
 
   etapa = 'persistencia';
+  await setStage('persistencia');
   const { data: updatedSource, error: updateError } = await admin
     .from('sources')
     .update({
@@ -537,6 +619,9 @@ export async function POST(request: Request) {
       verdict_score: consensus.averageVeracity,
       consensus_agreement: finalAgreement,
       requires_review: finalRequiresReview,
+      analysis_stage: 'completo',
+      analysis_finished_at: new Date().toISOString(),
+      analysis_error: null,
     })
     .eq('id', sourceId)
     .select()
@@ -567,7 +652,12 @@ export async function POST(request: Request) {
     if (sourceId) {
       const { error: reviewError } = await supabaseAdmin()
         .from('sources')
-        .update({ status: 'requiere_revision', requires_review: true })
+        .update({
+          status: 'requiere_revision',
+          requires_review: true,
+          analysis_error: message,
+          analysis_finished_at: new Date().toISOString(),
+        })
         .eq('id', sourceId);
       if (reviewError) {
         console.error('[analyze] Error marcando fuente requiere_revision en catch:', {
@@ -591,10 +681,18 @@ export async function POST(request: Request) {
           admin.from('sources').select('status').eq('id', sourceId).maybeSingle(),
           admin.from('ai_reports').select('id', { count: 'exact', head: true }).eq('source_id', sourceId),
         ]);
-        if (currentSource?.status === 'no_verificada' && (count ?? 0) === 0) {
+        if (
+          (currentSource?.status === 'no_verificada' || currentSource?.status === 'procesando') &&
+          (count ?? 0) === 0
+        ) {
           const { error: reviewError } = await admin
             .from('sources')
-            .update({ status: 'requiere_revision', requires_review: true })
+            .update({
+              status: 'requiere_revision',
+              requires_review: true,
+              analysis_error: 'El análisis no finalizó correctamente',
+              analysis_finished_at: new Date().toISOString(),
+            })
             .eq('id', sourceId);
           if (reviewError) {
             console.error('[analyze] Error marcando fuente requiere_revision en finally:', {

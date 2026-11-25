@@ -82,6 +82,7 @@ vi.mock('@/lib/ai/extract', () => ({
   extractYoutube: h.extractYoutube,
   extractDomain: () => 'ejemplo.cl',
   isYoutubeUrl: () => false,
+  MIN_CONTENT_CHARS: 200,
 }));
 
 vi.mock('@/lib/ai/openrouter', () => ({ callModel: h.callModel }));
@@ -193,7 +194,7 @@ describe('/api/analyze con filtro JEV', () => {
     h.extractArticle.mockReset();
     h.extractArticle.mockResolvedValue({
       title: 'Opinión sin hechos',
-      text: 'texto de opinión',
+      text: 'texto de opinión '.repeat(20),
       sourceType: 'articulo_noticia',
       transcriptUsed: false,
       transcriptWords: 0,
