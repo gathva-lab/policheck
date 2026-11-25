@@ -43,9 +43,18 @@ export function isVerdictLabel(value: unknown): value is VerdictLabel {
   return typeof value === 'string' && (VERDICT_LABELS as string[]).includes(value);
 }
 
-export function tierFromScore(score: number | null | undefined): VeracityTier | null {
+export function tierFromScore(
+  score: number | null | undefined,
+  label?: string | null
+): VeracityTier | null {
+  // `inchequeable` y `anejo` comparten a propósito el rango 0-4: son dos causas
+  // distintas de "no evaluable" (falta de evidencia vs. información desactualizada).
+  // Si el modelo declaró un label válido, ese label manda; si no, el tramo 0-4
+  // cae por defecto en `inchequeable`.
+  if (isVerdictLabel(label)) return tierFromLabel(label);
   if (score === null || score === undefined || Number.isNaN(score)) return null;
   const s = clampScore(score);
+  if (s <= 4) return tierFromLabel('inchequeable');
   return VERACITY_TAXONOMY.find((t) => s >= t.min && s <= t.max) ?? null;
 }
 

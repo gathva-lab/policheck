@@ -7,6 +7,8 @@ export interface ExtractedContent {
   title: string;
   text: string;
   sourceType: 'articulo_noticia' | 'video_youtube';
+  transcriptUsed: boolean;
+  transcriptWords: number;
 }
 
 export function isYoutubeUrl(url: string): boolean {
@@ -54,7 +56,15 @@ export async function extractArticle(url: string): Promise<ExtractedContent> {
   });
 
   const bodyText = paragraphs.length > 0 ? paragraphs.join('\n\n') : $('body').text().replace(/\s+/g, ' ').trim();
-  return { title, text: truncateToTokens(bodyText), sourceType: 'articulo_noticia' };
+  // En artículos no aplica transcripción; se marca como usada para no advertir
+  // un análisis parcial que no corresponde.
+  return {
+    title,
+    text: truncateToTokens(bodyText),
+    sourceType: 'articulo_noticia',
+    transcriptUsed: true,
+    transcriptWords: 0,
+  };
 }
 
 export async function extractYoutube(url: string): Promise<ExtractedContent> {
@@ -99,10 +109,18 @@ export async function extractYoutube(url: string): Promise<ExtractedContent> {
     // Transcripción opcional, no bloqueante
   }
 
+  const transcriptUsed = transcript.trim().length > 0;
+  const transcriptWords = transcriptUsed ? transcript.trim().split(/\s+/).length : 0;
+  if (!transcriptUsed) {
+    console.warn(`[extract] Sin transcripción para ${url}, se analiza solo la descripción`);
+  }
+
   const combined = [description, transcript].filter(Boolean).join('\n\n');
   return {
     title,
     text: truncateToTokens(combined || `Video de YouTube: ${title}`),
     sourceType: 'video_youtube',
+    transcriptUsed,
+    transcriptWords,
   };
 }

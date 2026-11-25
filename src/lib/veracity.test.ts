@@ -53,6 +53,24 @@ describe('tierFromScore (taxonomía 0-100)', () => {
     expect(tierFromScore(undefined)).toBeNull();
     expect(tierFromScore(Number.NaN)).toBeNull();
   });
+
+  it('en el tramo 0-4 el fallback por score es inchequeable', () => {
+    expect(tierFromScore(2)?.label).toBe('inchequeable');
+  });
+
+  it('el label válido manda sobre el score', () => {
+    expect(tierFromScore(2, 'anejo')?.label).toBe('anejo');
+    expect(tierFromScore(2, 'inchequeable')?.label).toBe('inchequeable');
+  });
+
+  it('ignora labels inválidos y usa el rango del score', () => {
+    expect(tierFromScore(2, 'falso')?.label).toBe('inchequeable');
+    expect(tierFromScore(78, 'falso')?.label).toBe('verdadero_pero');
+  });
+
+  it('mapea 78 al tier correcto', () => {
+    expect(tierFromScore(78)?.label).toBe('verdadero_pero');
+  });
 });
 
 describe('colores de la taxonomía', () => {

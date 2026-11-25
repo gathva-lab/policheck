@@ -298,6 +298,15 @@ export function AnalysisResults({ sourceId, politicianId, sourceUrl }: AnalysisR
     // Alertas de sesgo relevantes (filtramos las nulas y vacías, o donde dice "no se detecta gran sesgo")
     const biases = validReports.map(r => r.bias_analysis).filter(b => b && b.length > 20) as string[];
 
+    // Calidad de la fuente: si algún modelo reportó que se analizó sin transcripción,
+    // se avisa que el resultado puede ser parcial.
+    const transcriptMissing = reports.some((report) => {
+        const raw = report.report_json;
+        if (!raw || typeof raw !== 'object') return false;
+        const quality = (raw as { source_quality?: { transcript_used?: unknown } }).source_quality;
+        return quality?.transcript_used === false;
+    });
+
     const getScoreColor = (score: number) => {
         if (score >= 70) return "bg-emerald-500";
         if (score >= 40) return "bg-amber-500";
@@ -353,6 +362,13 @@ export function AnalysisResults({ sourceId, politicianId, sourceUrl }: AnalysisR
                         <Progress value={avgCoherence} className={`h-3 bg-slate-100 dark:bg-slate-800`} indicatorClassName={getScoreColor(avgCoherence)} />
                     </div>
                 </div>
+
+                {transcriptMissing && (
+                    <p className="mt-4 flex items-center gap-2 text-xs text-slate-500 dark:text-slate-400">
+                        <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+                        Este video se analizó sin transcripción (solo descripción). El resultado puede ser parcial.
+                    </p>
+                )}
             </div>
 
             {/* Sesgo */}
