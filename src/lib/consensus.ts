@@ -14,6 +14,8 @@ export interface ConsensusResult {
   verdictLabel: VerdictLabel | null;
   consensusAgreement: number | null;
   requiresReview: boolean;
+  // true cuando hay menos reportes que el mínimo pero al menos uno con veredicto.
+  partial: boolean;
   usedReports: ModelReport[];
   discardedReports: ModelReport[];
 }
@@ -83,14 +85,19 @@ export function computeConsensus(reports: ModelReport[], minimumValid = 2): Cons
   }
 
   if (usedReports.length < minimumValid) {
+    // Con un único reporte válido no hay consenso, pero se conserva su veredicto
+    // como preliminar para no perder la señal del modelo.
+    const singleReport = usedReports.length === 1 ? usedReports[0] : null;
+    const partialLabel = singleReport?.verdictLabel ?? null;
     return {
       averageVeracity: average(usedReports.map((r) => r.veracityScore as number)),
       averageCoherence: average(
         usedReports.filter((r) => r.coherenceScore !== null).map((r) => r.coherenceScore as number)
       ),
-      verdictLabel: null,
-      consensusAgreement: null,
+      verdictLabel: partialLabel,
+      consensusAgreement: partialLabel ? 0 : null,
       requiresReview: true,
+      partial: partialLabel !== null,
       usedReports,
       discardedReports,
     };
@@ -122,6 +129,7 @@ export function computeConsensus(reports: ModelReport[], minimumValid = 2): Cons
     verdictLabel: requiresReview ? null : majorityLabel,
     consensusAgreement,
     requiresReview,
+    partial: false,
     usedReports,
     discardedReports,
   };

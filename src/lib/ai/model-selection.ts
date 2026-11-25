@@ -5,9 +5,11 @@ export interface ModelConfigLike {
   is_active: boolean;
   fallback_id?: string | null;
   context_window?: number | null;
+  priority?: number | null;
 }
 
 const ECO_FAMILIES = ['deepseek', 'qwen', 'llama'] as const;
+const DEFAULT_PRIORITY = 100;
 
 function familyOf(modelId: string): string {
   const lower = modelId.toLowerCase();
@@ -15,6 +17,24 @@ function familyOf(modelId: string): string {
     if (lower.includes(family)) return family;
   }
   return lower.split('/')[0] ?? lower;
+}
+
+function priorityOf(config: ModelConfigLike): number {
+  return typeof config.priority === 'number' && Number.isFinite(config.priority)
+    ? config.priority
+    : DEFAULT_PRIORITY;
+}
+
+// Orden estable: primero la prioridad explícita y luego la familia, para que la
+// elección no dependa del orden en que la tabla devuelve las filas.
+function sortCandidates<T extends ModelConfigLike>(configs: T[]): T[] {
+  return [...configs].sort((a, b) => {
+    const byPriority = priorityOf(a) - priorityOf(b);
+    if (byPriority !== 0) return byPriority;
+    const byFamily = familyOf(a.model_id).localeCompare(familyOf(b.model_id));
+    if (byFamily !== 0) return byFamily;
+    return a.id.localeCompare(b.id);
+  });
 }
 
 /**
@@ -25,7 +45,7 @@ function familyOf(modelId: string): string {
  * recurso. Nunca devuelve más de 3 modelos.
  */
 export function pickTriplet<T extends ModelConfigLike>(configs: T[]): T[] {
-  const active = configs.filter((config) => config.is_active);
+  const active = sortCandidates(configs.filter((config) => config.is_active));
   const free = active.filter((config) => config.tier === 'free');
   const eco = active.filter((config) => config.tier === 'eco');
   const frontier = active.filter((config) => config.tier === 'frontier');

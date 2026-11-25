@@ -1,8 +1,14 @@
 import { describe, it, expect } from 'vitest';
 import { pickTriplet, type ModelConfigLike } from './model-selection';
 
-function config(id: string, model_id: string, tier: string, is_active = true): ModelConfigLike {
-  return { id, model_id, tier, is_active };
+function config(
+  id: string,
+  model_id: string,
+  tier: string,
+  is_active = true,
+  priority?: number
+): ModelConfigLike {
+  return { id, model_id, tier, is_active, priority };
 }
 
 describe('pickTriplet', () => {
@@ -46,6 +52,33 @@ describe('pickTriplet', () => {
 
     expect(triplet).toHaveLength(3);
     expect(triplet.map((c) => c.tier).sort()).toEqual(['eco', 'free', 'frontier']);
+  });
+
+  it('ordena los eco por prioridad: elige deepseek-v4.1-flash y no deepseek-v3.2', () => {
+    const triplet = pickTriplet([
+      config('f', 'nvidia/nemotron-3-ultra-550b-a55b:free', 'free', true, 50),
+      config('v3', 'deepseek/deepseek-v3.2', 'eco', true, 100),
+      config('v41', 'deepseek/deepseek-v4.1-flash', 'eco', true, 10),
+      config('hy', 'tencent/hy4-flash', 'eco', true, 10),
+    ]);
+
+    const ecoIds = triplet.filter((c) => c.tier === 'eco').map((c) => c.model_id);
+    expect(ecoIds).toContain('deepseek/deepseek-v4.1-flash');
+    expect(ecoIds).not.toContain('deepseek/deepseek-v3.2');
+  });
+
+  it('usa la prioridad ascendente y luego la familia de forma determinista', () => {
+    const triplet = pickTriplet([
+      config('q', 'qwen/qwen3-32b', 'eco', true, 20),
+      config('d', 'deepseek/deepseek-v4.1-flash', 'eco', true, 10),
+      config('f', 'nvidia/nemotron-3-ultra-550b-a55b:free', 'free', true, 50),
+    ]);
+
+    expect(triplet.map((c) => c.model_id)).toEqual([
+      'nvidia/nemotron-3-ultra-550b-a55b:free',
+      'deepseek/deepseek-v4.1-flash',
+      'qwen/qwen3-32b',
+    ]);
   });
 
   it('ignora modelos inactivos', () => {

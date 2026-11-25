@@ -19,7 +19,13 @@ interface AIReport {
     bias_analysis: string | null;
     summary: string | null;
     key_claims: string[] | null;
+    report_json?: unknown;
     [key: string]: unknown;
+}
+
+interface JevVerification {
+    choice: string;
+    confidence: number;
 }
 
 interface SourceVerdict {
@@ -38,6 +44,29 @@ interface AnalysisResultsProps {
 
 const POLL_INTERVAL_MS = 5000;
 const MAX_POLL_ATTEMPTS = 24;
+const EXPECTED_MODELS = 3;
+
+const JEV_LABEL: Record<string, string> = {
+    soportado: "Justificación verificada",
+    parcial: "Justificación parcialmente respaldada",
+    no_soportado: "La verificación no confirmó la justificación",
+};
+
+function getJevVerification(reports: AIReport[]): JevVerification | null {
+    for (const report of reports) {
+        const raw = report.report_json;
+        if (!raw || typeof raw !== "object") continue;
+        const jev = (raw as { _jev?: unknown })._jev;
+        if (!jev || typeof jev !== "object") continue;
+        const choice = (jev as { choice?: unknown }).choice;
+        if (typeof choice !== "string") continue;
+        return {
+            choice,
+            confidence: Number((jev as { confidence?: unknown }).confidence ?? 0),
+        };
+    }
+    return null;
+}
 
 const BADGE_CLASS: Record<VeracityColor, string> = {
     green: "bg-emerald-100 text-emerald-800 dark:bg-emerald-900/40 dark:text-emerald-300",
@@ -176,21 +205,24 @@ export function AnalysisResults({ sourceId, politicianId, sourceUrl }: AnalysisR
 
     const verdictColor = colorFromLabel(verdict?.verdict ?? null);
 
+    const reviewBadge = (
+        <span className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-300 text-sm font-semibold">
+            <Activity className="h-4 w-4" />
+            En revisión
+        </span>
+    );
+
     const renderVerdictBadge = () => {
-        if (verdict?.requires_review || !verdict?.verdict) {
-            return (
-                <span className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-300 text-sm font-semibold">
-                    <Activity className="h-4 w-4" />
-                    En revisión
-                </span>
-            );
-        }
+        if (!verdict?.verdict) return reviewBadge;
         const display = displayLabel(verdict.verdict);
         const cls = BADGE_CLASS[verdictColor ?? "gray"];
         return (
-            <span className={`inline-flex items-center gap-2 px-3 py-1 rounded-full ${cls} text-sm font-semibold`}>
-                {display ?? verdict.verdict}
-            </span>
+            <>
+                <span className={`inline-flex items-center gap-2 px-3 py-1 rounded-full ${cls} text-sm font-semibold`}>
+                    {display ?? verdict.verdict}
+                </span>
+                {verdict.requires_review && reviewBadge}
+            </>
         );
     };
 
@@ -330,6 +362,16 @@ export function AnalysisResults({ sourceId, politicianId, sourceUrl }: AnalysisR
     // Alertas de sesgo relevantes (filtramos las nulas y vacías, o donde dice "no se detecta gran sesgo")
     const biases = validReports.map(r => r.bias_analysis).filter(b => b && b.length > 20) as string[];
 
+    // Verificación JEV y grado de completitud del triplete.
+    const jevVerification = getJevVerification(reports);
+    const jevLabel = jevVerification ? JEV_LABEL[jevVerification.choice] ?? jevVerification.choice : null;
+    const isPartial = Boolean(verdict?.verdict) && validReports.length > 0 && validReports.length < EXPECTED_MODELS;
+    const reviewExplanation = isPartial
+        ? `Solo respondió ${validReports.length} de ${EXPECTED_MODELS} modelos. El veredicto es preliminar.`
+        : jevVerification?.choice === "no_soportado"
+            ? "La verificación automática no confirmó la justificación."
+            : "El veredicto requiere revisión.";
+
     // Calidad de la fuente: si algún modelo reportó que se analizó sin transcripción,
     // se avisa que el resultado puede ser parcial.
     const transcriptMissing = reports.some((report) => {
@@ -399,6 +441,19 @@ export function AnalysisResults({ sourceId, politicianId, sourceUrl }: AnalysisR
                     <p className="mt-4 flex items-center gap-2 text-xs text-slate-500 dark:text-slate-400">
                         <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
                         Este video se analizó sin transcripción (solo descripción). El resultado puede ser parcial.
+                    </p>
+                )}
+
+                {verdict?.verdict && (isPartial || verdict.requires_review) && (
+                    <p className="mt-4 flex items-center gap-2 text-sm text-amber-700 dark:text-amber-300">
+                        <Activity className="h-4 w-4 shrink-0" />
+                        {reviewExplanation}
+                    </p>
+                )}
+
+                {jevLabel && jevVerification && (
+                    <p className="mt-2 text-sm text-slate-600 dark:text-slate-400">
+                        JEV: {jevLabel} ({Math.round(jevVerification.confidence * 100)}% de confianza)
                     </p>
                 )}
             </div>
