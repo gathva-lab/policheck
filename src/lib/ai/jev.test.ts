@@ -85,7 +85,10 @@ vi.mock('@/lib/ai/extract', () => ({
   MIN_CONTENT_CHARS: 200,
 }));
 
-vi.mock('@/lib/ai/openrouter', () => ({ callModel: h.callModel }));
+vi.mock('@/lib/ai/openrouter', () => ({
+  callModel: h.callModel,
+  modelTimeoutFor: (inputChars: number) => (inputChars < 6000 ? 45000 : 75000),
+}));
 
 function mockJson(body: unknown, status = 200): Response {
   return {
@@ -180,6 +183,31 @@ describe('verifyConsensusVerdict', () => {
 
     expect(result?.choice).toBe('no_soportado');
     expect(result?.confidence).toBe(0.85);
+  });
+
+  it('evalúa coherencia razonable y no literalidad en la pregunta de soporte', async () => {
+    h.fetchMock.mockResolvedValue(
+      mockJson({
+        soporte: {
+          choice: 'soportado',
+          confidence: 0.9,
+          probabilities: { soportado: 0.9 },
+        },
+      })
+    );
+
+    await verifyConsensusVerdict('verdadero', 80, 'Justificación', 'extracto', 'api-key');
+
+    const body = JSON.parse(h.fetchMock.mock.calls[0][1].body as string) as {
+      questions: {
+        soporte: { instructions: string; criteria: Record<string, string> };
+      };
+    };
+    expect(body.questions.soporte.instructions).toContain('coherente con el contenido');
+    expect(body.questions.soporte.instructions).toContain('aunque no cite cada frase');
+    expect(body.questions.soporte.criteria.soportado).toContain(
+      'aunque el resumen no reproduzca frases literales'
+    );
   });
 
   it('verifica con el texto completo: 20.000 chars se trocean a 12.000 (inicio y final)', async () => {

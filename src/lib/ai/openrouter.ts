@@ -1,7 +1,13 @@
 const OPENROUTER_URL = 'https://openrouter.ai/api/v1/chat/completions';
-const MODEL_TIMEOUT_MS = 45000;
+export const MODEL_TIMEOUT_MS = 75000;
 const MAX_TOKENS = 6000;
 const RATE_LIMIT_BACKOFF_MS = 1500;
+
+// Fuentes largas necesitan más tiempo de generación. Por debajo de 6000
+// caracteres basta el timeout corto; desde ahí se usa el máximo.
+export function modelTimeoutFor(inputChars: number): number {
+  return inputChars < 6000 ? 45000 : MODEL_TIMEOUT_MS;
+}
 
 export type CallFailureReason =
   | 'timeout'
@@ -23,6 +29,7 @@ export interface OpenRouterResult {
 export interface CallModelOptions {
   maxTokens?: number;
   retryOn429?: boolean;
+  timeoutMs?: number;
 }
 
 export interface ModelCheckResult {
@@ -59,6 +66,7 @@ async function executeCompletion(
 ): Promise<CompletionOutcome> {
   const maxTokens = options.maxTokens ?? MAX_TOKENS;
   const retryOn429 = options.retryOn429 ?? true;
+  const timeoutMs = options.timeoutMs ?? MODEL_TIMEOUT_MS;
   const maxAttempts = retryOn429 ? 2 : 1;
   const start = Date.now();
 
@@ -77,7 +85,7 @@ async function executeCompletion(
 
   for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), MODEL_TIMEOUT_MS);
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
     try {
       const response = await fetch(OPENROUTER_URL, {

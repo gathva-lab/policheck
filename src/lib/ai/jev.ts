@@ -9,6 +9,9 @@ export const JEV_OUTPUT_FREE = true;
 
 const JEV_TIMEOUT_MS = 8000;
 const JEV_VERIFIABLE_THRESHOLD = 0.35;
+// Bajo este umbral la verificación insegura veta el consenso. Se mantiene bajo
+// para que una JEV dubitativa no tumbe un consenso sólido.
+export const JEV_VETO_CONFIDENCE = 0.4;
 const JEV_EXCERPT_CHARS = 6000;
 // La verificación post-consenso usa el texto completo que vieron los modelos,
 // recortado a este máximo. Fuentes más largas se trocean (inicio y final).
@@ -195,9 +198,10 @@ export async function verifyConsensusVerdict(
       soporte: {
         type: 'choice',
         instructions:
-          '¿La justificación del veredicto se sostiene con el contenido de la fuente? Responde soportado si se sostiene, parcial si solo en parte, o no_soportado si lo contradice o inventa hechos.',
+          '¿La justificación del veredicto es coherente con el contenido de la fuente? Responde soportado si la conclusión se desprende razonablemente de lo dicho, aunque no cite cada frase. parcial si solo una parte se apoya en el contenido. no_soportado si contradice lo dicho o atribuye afirmaciones que no aparecen.',
         criteria: {
-          soportado: 'La justificación se sostiene con el contenido de la fuente y no inventa ni contradice hechos.',
+          soportado:
+            'La justificación se sostiene con el contenido de la fuente y no inventa ni contradice hechos. La conclusión se sigue del contenido aunque el resumen no reproduzca frases literales.',
           parcial: 'La justificación se sostiene solo en parte: algunos elementos tienen respaldo en la fuente y otros no.',
           no_soportado: 'La justificación contradice el contenido de la fuente o inventa hechos que no aparecen en ella.',
         },

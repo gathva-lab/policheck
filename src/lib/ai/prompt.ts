@@ -19,13 +19,14 @@ Reglas:
 5. La summary debe ser coherente con el veredicto: si el veredicto es negativo, no la describas como verdadera.
 6. bias_analysis: detecta sesgos, lenguaje cargado o técnicas retóricas; si no hay sesgo evidente, indícalo.
 7. Si el texto es insuficiente para verificar o no hay evidencia disponible, usa inchequeable y explica. Si la afirmación fue verificable pero el contexto temporal la volvió obsoleta, usa anejo.
-8. Lenguaje ciudadano: plain_verdict es UNA sola frase (máximo 20 palabras) que entienda una persona sin formación política. plain_summary son 2 o 3 frases en lenguaje llano que expliquen qué dijo el político y si se sostiene.
+8. Lenguaje ciudadano: plain_verdict es UNA sola frase (máximo 20 palabras) que entienda una persona sin formación política. plain_summary son 2 o 3 frases en lenguaje llano que expliquen qué dijo el político y si se sostiene. Si el contenido supera los 30 minutos, usa como máximo 2 frases.
 9. Anti-jerga: no uses las palabras FEVER, NEI, SUPPORTED, REFUTED ni el término "veracidad" en plain_verdict ni en plain_summary: el lector no es experto.
-10. quotes: entre 1 y 5 frases textuales realmente evaluadas. Cada elemento lleva text (la frase literal del político) y assessment (qué se encontró al verificarla).
+10. quotes: entre 1 y 3 frases textuales realmente evaluadas (máximo 3). Cada elemento lleva text (la frase literal del político) y assessment (qué se encontró al verificarla).
 11. content_nature: clasifica el contenido como "opinion", "mixto" o "factual". Si es mayoritariamente opinión, propuesta o consigna sin datos falsables, debe ser "opinion".
 12. Honestidad: si content_nature es "opinion", dilo claramente en plain_summary y baja el veracity_score a la franja inchequeable (0-4) o discutible (60-74): no es posible verificar opiniones.
 13. Neutralidad: no emitas juicios sobre las ideas políticas, solo sobre su relación con la evidencia.
 14. Explica veracity_score y coherence_score en plain_summary sin usar esos términos técnicos ni la palabra "veracidad".
+15. Sé conciso: el análisis completo no debe superar 1 200 tokens de salida.
 
 Formato JSON exacto:
 {

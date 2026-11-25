@@ -10,7 +10,12 @@ import {
   type ExtractedContent,
 } from '@/lib/ai/extract';
 import { FEVER_SYSTEM_PROMPT } from '@/lib/ai/prompt';
-import { callModel, type CallFailureReason, type OpenRouterResult } from '@/lib/ai/openrouter';
+import {
+  callModel,
+  modelTimeoutFor,
+  type CallFailureReason,
+  type OpenRouterResult,
+} from '@/lib/ai/openrouter';
 import { parseModelOutput, type ParsedAnalysis } from '@/lib/ai/parse';
 import { computeConsensus, type ModelReport } from '@/lib/consensus';
 import { buildAttempts, pickTriplet, type AttemptCandidate } from '@/lib/ai/model-selection';
@@ -20,6 +25,7 @@ import {
   verifyConsensusVerdict,
   jevCostUsd,
   JEV_MODEL,
+  JEV_VETO_CONFIDENCE,
   type ConsensusVerification,
   type JevUsage,
 } from '@/lib/ai/jev';
@@ -396,7 +402,8 @@ export async function POST(request: Request) {
         status: 'verificada',
         verdict: 'inchequeable',
         verdict_score: 0,
-        consensus_agreement: 1,
+        // La columna consensus_agreement se guarda como porcentaje 0–100: 100 = acuerdo total.
+        consensus_agreement: 100,
         requires_review: false,
         analysis_stage: 'completo',
         analysis_finished_at: new Date().toISOString(),
@@ -457,6 +464,16 @@ export async function POST(request: Request) {
   // siguiente activo del mismo tier que no forme parte del triplete.
   const attempts: AttemptCandidate[][] = buildAttempts(triplet, configRows);
 
+  // Fuentes largas reciben más tiempo de generación.
+  const modelTimeoutMs = modelTimeoutFor(content.text.length);
+  // El fallback solo tiene sentido si el fallo fue transitorio o de salida.
+  // Un timeout no lo dispara: el proveedor ya está lento con ese tamaño.
+  const FALLBACK_REASONS: ReadonlySet<CallFailureReason> = new Set([
+    'http_429',
+    'http_4xx',
+    'empty',
+  ]);
+
   // 5. Llamada multi-modelo en paralelo con fallback por modelo.
   // Cada intento conserva el motivo si no llega a producir un reporte.
   const settled = await Promise.allSettled(
@@ -471,7 +488,8 @@ export async function POST(request: Request) {
           content.text,
           (reason) => {
             candidateFailure = reason;
-          }
+          },
+          { timeoutMs: modelTimeoutMs }
         );
         if (result) {
           const parsed = parseModelOutput(result.model, result.content);
@@ -481,11 +499,14 @@ export async function POST(request: Request) {
             failures,
           };
         }
+        const reason = candidateFailure ?? 'http_error';
         failures.push({
           modelId: candidate.modelId,
           tier: candidate.tier,
-          reason: candidateFailure ?? 'http_error',
+          reason,
         });
+        // Cortacircuitos: solo se intenta el fallback en fallos transitorios.
+        if (!FALLBACK_REASONS.has(reason)) break;
       }
       return {
         call: null,
@@ -573,6 +594,19 @@ export async function POST(request: Request) {
   const parsedModels = successes.filter((s) => s.parsed.report !== null);
   const reports: ModelReport[] = parsedModels.map((s) => s.parsed.report as ModelReport);
 
+  // Diagnóstico del intento multi-modelo: modelos intentados (incluye fallbacks),
+  // modelos que produjeron reporte y cuántos fallaron por timeout. Se guarda en
+  // cada reporte para que la UI pueda mostrar "N de M modelos respondieron".
+  const attemptDiagnostics = outcomes.reduce(
+    (acc, outcome) => {
+      acc.modelsAttempted += outcome.failures.length + (outcome.call ? 1 : 0);
+      if (outcome.call && outcome.call.parsed.report !== null) acc.modelsResponded += 1;
+      acc.timeouts += outcome.failures.filter((failure) => failure.reason === 'timeout').length;
+      return acc;
+    },
+    { modelsAttempted: 0, modelsResponded: 0, timeouts: 0 }
+  );
+
   etapa = 'persistencia';
   // 6. Persistir reportes por modelo + costos
   let reportInserts = 0;
@@ -595,6 +629,7 @@ export async function POST(request: Request) {
               transcript_used: content.transcriptUsed,
               transcript_words: content.transcriptWords,
             },
+            _analysis: attemptDiagnostics,
           }
         : raw;
     reportInserts += 1;
@@ -691,11 +726,15 @@ export async function POST(request: Request) {
   if (jevVerification) {
     await logJevCost(admin, sourceId, jevVerification.usage, jevVerification.latencyMs);
 
-    if (jevVerification.choice === 'no_soportado' || jevVerification.confidence < 0.5) {
+    if (jevVerification.choice === 'no_soportado' || jevVerification.confidence < JEV_VETO_CONFIDENCE) {
       finalRequiresReview = true;
       finalStatus = 'requiere_revision';
-      const soportado = jevVerification.probabilities.soportado ?? 0;
-      finalAgreement = finalAgreement === null ? soportado : Math.min(finalAgreement, soportado);
+      // consensus_agreement se guarda como porcentaje 0–100, pero las
+      // probabilidades de JEV vienen en escala 0–1: se convierten a porcentaje.
+      const soportado = jevVerification.probabilities.soportado;
+      if (typeof soportado === 'number') {
+        finalAgreement = Math.min(finalAgreement ?? 100, Math.round(soportado * 100));
+      }
     }
 
     await saveJevToReports(admin, sourceId, jevVerification);

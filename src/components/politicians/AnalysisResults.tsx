@@ -27,14 +27,23 @@ interface AIReport {
 interface JevVerification {
     choice: string;
     confidence: number;
+    // Probabilidad 0–1 de que la justificación esté respaldada. Null si JEV no la envió.
+    soportado: number | null;
 }
 
 interface SourceVerdict {
     verdict: string | null;
     verdict_score: number | null;
+    consensus_agreement: number | null;
     requires_review: boolean;
     status: string | null;
     analysis_error: string | null;
+}
+
+interface AnalysisDiagnostics {
+    modelsAttempted: number;
+    modelsResponded: number;
+    timeouts: number;
 }
 
 interface AnalysisResultsProps {
@@ -61,9 +70,33 @@ function getJevVerification(reports: AIReport[]): JevVerification | null {
         if (!jev || typeof jev !== "object") continue;
         const choice = (jev as { choice?: unknown }).choice;
         if (typeof choice !== "string") continue;
+        const probabilities = (jev as { probabilities?: Record<string, unknown> }).probabilities;
+        const soportadoRaw = probabilities?.soportado;
+        const soportado = Number(soportadoRaw);
         return {
             choice,
             confidence: Number((jev as { confidence?: unknown }).confidence ?? 0),
+            soportado: Number.isFinite(soportado) ? soportado : null,
+        };
+    }
+    return null;
+}
+
+function getAnalysisDiagnostics(reports: AIReport[]): AnalysisDiagnostics | null {
+    for (const report of reports) {
+        const raw = report.report_json;
+        if (!raw || typeof raw !== "object") continue;
+        const analysis = (raw as { _analysis?: unknown })._analysis;
+        if (!analysis || typeof analysis !== "object") continue;
+        const obj = analysis as Record<string, unknown>;
+        const modelsAttempted = Number(obj.modelsAttempted);
+        const modelsResponded = Number(obj.modelsResponded);
+        if (!Number.isFinite(modelsAttempted) || !Number.isFinite(modelsResponded)) continue;
+        const timeouts = Number(obj.timeouts ?? 0);
+        return {
+            modelsAttempted,
+            modelsResponded,
+            timeouts: Number.isFinite(timeouts) ? timeouts : 0,
         };
     }
     return null;
@@ -145,7 +178,7 @@ export function AnalysisResults({ sourceId, politicianId, sourceUrl }: AnalysisR
         const supabase = createClient();
         const [reportsRes, sourceRes] = await Promise.all([
             supabase.from('ai_reports').select('*').eq('source_id', sourceId),
-            supabase.from('sources').select('verdict, verdict_score, requires_review, status, analysis_error').eq('id', sourceId).maybeSingle(),
+            supabase.from('sources').select('verdict, verdict_score, consensus_agreement, requires_review, status, analysis_error').eq('id', sourceId).maybeSingle(),
         ]);
 
         if (reportsRes.error) {
@@ -157,6 +190,7 @@ export function AnalysisResults({ sourceId, politicianId, sourceUrl }: AnalysisR
             ? {
                 verdict: sourceRes.data.verdict ?? null,
                 verdict_score: sourceRes.data.verdict_score ?? null,
+                consensus_agreement: sourceRes.data.consensus_agreement ?? null,
                 requires_review: sourceRes.data.requires_review ?? false,
                 status: sourceRes.data.status ?? null,
                 analysis_error: sourceRes.data.analysis_error ?? null,
@@ -417,9 +451,15 @@ export function AnalysisResults({ sourceId, politicianId, sourceUrl }: AnalysisR
     // Verificación JEV y grado de completitud del triplete.
     const jevVerification = getJevVerification(reports);
     const jevLabel = jevVerification ? JEV_LABEL[jevVerification.choice] ?? jevVerification.choice : null;
-    const isPartial = Boolean(verdict?.verdict) && validReports.length > 0 && validReports.length < EXPECTED_MODELS;
+    const jevSoportado = jevVerification?.soportado ?? null;
+    // Diagnóstico de cuántos modelos se intentaron (incluye fallbacks) y respondieron.
+    const diagnostics = getAnalysisDiagnostics(reports);
+    const modelsAttempted = diagnostics?.modelsAttempted ?? EXPECTED_MODELS;
+    const modelsResponded = diagnostics?.modelsResponded ?? validReports.length;
+    const timedOutCount = diagnostics?.timeouts ?? 0;
+    const isPartial = Boolean(verdict?.verdict) && validReports.length > 0 && modelsResponded < modelsAttempted;
     const reviewExplanation = isPartial
-        ? `Solo respondió ${validReports.length} de ${EXPECTED_MODELS} modelos. El veredicto es preliminar.`
+        ? `Solo respondieron ${modelsResponded} de ${modelsAttempted} modelos. El veredicto es preliminar.`
         : jevVerification?.choice === "no_soportado"
             ? "La verificación automática no confirmó la justificación."
             : "El veredicto requiere revisión.";
@@ -542,6 +582,24 @@ export function AnalysisResults({ sourceId, politicianId, sourceUrl }: AnalysisR
                     <p className="mt-4 flex items-center gap-2 text-xs text-slate-500 dark:text-slate-400">
                         <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
                         Este video se analizó sin transcripción (solo descripción). El resultado puede ser parcial.
+                    </p>
+                )}
+
+                <p className="mt-4 flex items-center gap-2 text-sm text-slate-600 dark:text-slate-400">
+                    <BrainCircuit className="h-4 w-4 shrink-0" />
+                    {modelsResponded} de {modelsAttempted} modelos respondieron
+                    {timedOutCount > 0 ? ` (${timedOutCount} por timeout)` : ''}.
+                </p>
+
+                {typeof verdict?.consensus_agreement === 'number' && (
+                    <p className="mt-2 text-sm text-slate-600 dark:text-slate-400">
+                        Acuerdo entre modelos: {Math.round(verdict.consensus_agreement)}% (porcentaje 0–100).
+                    </p>
+                )}
+
+                {typeof jevSoportado === 'number' && (
+                    <p className="mt-2 text-sm text-slate-600 dark:text-slate-400">
+                        Verificación automática: {Math.round(jevSoportado * 100)}% de respaldo.
                     </p>
                 )}
 
