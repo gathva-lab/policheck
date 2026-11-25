@@ -214,6 +214,96 @@ describe('/api/analyze diagnóstico de modelos sin reporte', () => {
   });
 });
 
+describe('/api/analyze agreement en escala 0–100', () => {
+  it('con soportado 0.28 y consenso 100 guarda consensus_agreement 28', async () => {
+    process.env.OPENROUTER_API_KEY = 'test-key';
+    process.env.SUPABASE_SERVICE_ROLE_KEY = 'test-service-role';
+    process.env.NEXT_PUBLIC_SUPABASE_URL = 'https://supabase.test';
+
+    h.updates.length = 0;
+    h.callModel.mockReset();
+    h.isVerifiable.mockReset();
+    h.verifyConsensusVerdict.mockReset();
+    h.extractArticle.mockReset();
+    h.extractArticle.mockResolvedValue({
+      title: 'Nota',
+      text: 'contenido factual suficiente '.repeat(20),
+      sourceType: 'articulo_noticia',
+      transcriptUsed: false,
+      transcriptWords: 0,
+    });
+    h.isVerifiable.mockResolvedValue(null);
+    h.verifyConsensusVerdict.mockResolvedValue({
+      choice: 'no_soportado',
+      confidence: 0.9,
+      probabilities: { soportado: 0.28, parcial: 0.2, no_soportado: 0.52 },
+      usage: { inputTokens: 100, outputTokens: 0, totalTokens: 100 },
+      latencyMs: 1,
+    });
+    h.callModel.mockImplementation(async (modelId: string) => ({
+      model: modelId,
+      content:
+        '{"verdict_label":"discutible","veracity_score":65,"coherence_score":70,"summary":"ok"}',
+      inputTokens: 20,
+      outputTokens: 10,
+      latencyMs: 5,
+    }));
+
+    const { POST } = await import('@/app/api/analyze/route');
+    const request = new Request('http://localhost/api/analyze', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url: 'https://ejemplo.cl/nota', politicianId: 'politico-1' }),
+    });
+
+    await POST(request);
+
+    const finalUpdate = h.updates.find(
+      (update) => update.table === 'sources' && 'consensus_agreement' in update.values
+    );
+    expect(finalUpdate?.values.consensus_agreement).toBe(28);
+  });
+
+  it('el atajo de contenido no verificable guarda consensus_agreement 100', async () => {
+    process.env.OPENROUTER_API_KEY = 'test-key';
+    process.env.SUPABASE_SERVICE_ROLE_KEY = 'test-service-role';
+    process.env.NEXT_PUBLIC_SUPABASE_URL = 'https://supabase.test';
+
+    h.updates.length = 0;
+    h.callModel.mockReset();
+    h.isVerifiable.mockReset();
+    h.extractArticle.mockReset();
+    h.extractArticle.mockResolvedValue({
+      title: 'Opinión',
+      text: 'texto de opinión '.repeat(20),
+      sourceType: 'articulo_noticia',
+      transcriptUsed: false,
+      transcriptWords: 0,
+    });
+    h.isVerifiable.mockResolvedValue({
+      verificable: false,
+      probability: 0.2,
+      usage: { inputTokens: 100, outputTokens: 0, totalTokens: 100 },
+      latencyMs: 1,
+    });
+
+    const { POST } = await import('@/app/api/analyze/route');
+    const request = new Request('http://localhost/api/analyze', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url: 'https://ejemplo.cl/nota', politicianId: 'politico-1' }),
+    });
+
+    await POST(request);
+
+    const skippedUpdate = h.updates.find(
+      (update) =>
+        update.table === 'sources' && update.values.status === 'verificada' && 'consensus_agreement' in update.values
+    );
+    expect(skippedUpdate?.values.consensus_agreement).toBe(100);
+  });
+});
+
 describe('/api/analyze fallbacks', () => {
   it('descarta un fallback inactivo y no lo llama', async () => {
     process.env.OPENROUTER_API_KEY = 'test-key';

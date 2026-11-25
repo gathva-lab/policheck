@@ -396,7 +396,8 @@ export async function POST(request: Request) {
         status: 'verificada',
         verdict: 'inchequeable',
         verdict_score: 0,
-        consensus_agreement: 1,
+        // La columna consensus_agreement se guarda como porcentaje 0–100: 100 = acuerdo total.
+        consensus_agreement: 100,
         requires_review: false,
         analysis_stage: 'completo',
         analysis_finished_at: new Date().toISOString(),
@@ -694,8 +695,12 @@ export async function POST(request: Request) {
     if (jevVerification.choice === 'no_soportado' || jevVerification.confidence < 0.5) {
       finalRequiresReview = true;
       finalStatus = 'requiere_revision';
-      const soportado = jevVerification.probabilities.soportado ?? 0;
-      finalAgreement = finalAgreement === null ? soportado : Math.min(finalAgreement, soportado);
+      // consensus_agreement se guarda como porcentaje 0–100, pero las
+      // probabilidades de JEV vienen en escala 0–1: se convierten a porcentaje.
+      const soportado = jevVerification.probabilities.soportado;
+      if (typeof soportado === 'number') {
+        finalAgreement = Math.min(finalAgreement ?? 100, Math.round(soportado * 100));
+      }
     }
 
     await saveJevToReports(admin, sourceId, jevVerification);
