@@ -105,6 +105,7 @@ vi.mock('@/lib/ai/jev', () => ({
   verifyConsensusVerdict: h.verifyConsensusVerdict,
   jevCostUsd: () => 0,
   JEV_MODEL: 'typesafe/jev-1.14',
+  JEV_VETO_CONFIDENCE: 0.4,
 }));
 
 beforeEach(() => {

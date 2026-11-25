@@ -25,6 +25,7 @@ import {
   verifyConsensusVerdict,
   jevCostUsd,
   JEV_MODEL,
+  JEV_VETO_CONFIDENCE,
   type ConsensusVerification,
   type JevUsage,
 } from '@/lib/ai/jev';
@@ -711,7 +712,7 @@ export async function POST(request: Request) {
   if (jevVerification) {
     await logJevCost(admin, sourceId, jevVerification.usage, jevVerification.latencyMs);
 
-    if (jevVerification.choice === 'no_soportado' || jevVerification.confidence < 0.5) {
+    if (jevVerification.choice === 'no_soportado' || jevVerification.confidence < JEV_VETO_CONFIDENCE) {
       finalRequiresReview = true;
       finalStatus = 'requiere_revision';
       // consensus_agreement se guarda como porcentaje 0–100, pero las
