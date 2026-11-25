@@ -594,6 +594,19 @@ export async function POST(request: Request) {
   const parsedModels = successes.filter((s) => s.parsed.report !== null);
   const reports: ModelReport[] = parsedModels.map((s) => s.parsed.report as ModelReport);
 
+  // Diagnóstico del intento multi-modelo: modelos intentados (incluye fallbacks),
+  // modelos que produjeron reporte y cuántos fallaron por timeout. Se guarda en
+  // cada reporte para que la UI pueda mostrar "N de M modelos respondieron".
+  const attemptDiagnostics = outcomes.reduce(
+    (acc, outcome) => {
+      acc.modelsAttempted += outcome.failures.length + (outcome.call ? 1 : 0);
+      if (outcome.call && outcome.call.parsed.report !== null) acc.modelsResponded += 1;
+      acc.timeouts += outcome.failures.filter((failure) => failure.reason === 'timeout').length;
+      return acc;
+    },
+    { modelsAttempted: 0, modelsResponded: 0, timeouts: 0 }
+  );
+
   etapa = 'persistencia';
   // 6. Persistir reportes por modelo + costos
   let reportInserts = 0;
@@ -616,6 +629,7 @@ export async function POST(request: Request) {
               transcript_used: content.transcriptUsed,
               transcript_words: content.transcriptWords,
             },
+            _analysis: attemptDiagnostics,
           }
         : raw;
     reportInserts += 1;
