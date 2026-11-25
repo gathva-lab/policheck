@@ -6,6 +6,7 @@ import { FEVER_SYSTEM_PROMPT } from '@/lib/ai/prompt';
 import { callModel, type OpenRouterResult } from '@/lib/ai/openrouter';
 import { parseModelOutput, type ParsedAnalysis } from '@/lib/ai/parse';
 import { computeConsensus, type ModelReport } from '@/lib/consensus';
+import { pickTriplet } from '@/lib/ai/model-selection';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -14,12 +15,23 @@ export const maxDuration = 300;
 const DAILY_LIMIT = 5;
 const MIN_VALID_MODELS = 2;
 
-const TIER_ORDER: Record<string, number> = { free: 0, eco: 1, frontier: 2 };
-
+// Precios verificados contra la API de OpenRouter el 2026-11-25.
 const PRICE_PER_1M_TOKENS: Record<string, { input: number; output: number }> = {
-  'deepseek/deepseek-v3.2': { input: 0.27, output: 0.4 },
+  // Eco (operativos)
+  'deepseek/deepseek-v3.2': { input: 0.26, output: 0.38 },
   'qwen/qwen3-32b': { input: 0.08, output: 0.28 },
-  'meta-llama/llama-3.3-70b-instruct': { input: 0.1, output: 0.32 },
+  'meta-llama/llama-3.3-70b-instruct': { input: 0.71, output: 0.71 },
+  // Free
+  'nvidia/nemotron-3-ultra-550b-a55b:free': { input: 0, output: 0 },
+  'nvidia/nemotron-3.5-lightning:free': { input: 0, output: 0 },
+  'google/gemma-4-31b-it:free': { input: 0, output: 0 },
+  'nvidia/nemotron-3-nano-30b-a3b:free': { input: 0, output: 0 },
+  // Frontier (desactivados por defecto; precios para cuando se activen)
+  'anthropic/claude-sonnet-5.5': { input: 2.0, output: 10.0 },
+  'anthropic/claude-opus-5.5': { input: 4.0, output: 20.0 },
+  'openai/gpt-5.2-chat': { input: 1.75, output: 14.0 },
+  'google/gemini-3-flash-preview': { input: 0.5, output: 3.0 },
+  'x-ai/grok-4.3': { input: 1.25, output: 2.5 },
 };
 
 interface ModelConfigRow {
@@ -202,14 +214,12 @@ export async function POST(request: Request) {
     sourceId = insertedSource.id;
   }
 
-  // 4. Leer el triplete activo de ai_model_config (tier free primero) con su fallback
+  // 4. Componer el triplete activo: 1 free + 2 eco (familias distintas).
+  // Frontier queda solo como último recurso y no está activo por defecto.
   const { data: configs } = await admin.from('ai_model_config').select('*');
   const configRows = (configs ?? []) as ModelConfigRow[];
   const configById = new Map(configRows.map((c) => [c.id, c]));
-  const activeSorted = configRows
-    .filter((c) => c.is_active)
-    .sort((a, b) => (TIER_ORDER[a.tier] ?? 9) - (TIER_ORDER[b.tier] ?? 9));
-  const triplet = activeSorted.slice(0, 3);
+  const triplet = pickTriplet(configRows);
 
   if (triplet.length === 0) {
     const { error: noModelsError } = await admin
@@ -308,9 +318,15 @@ export async function POST(request: Request) {
     }
 
     const price = PRICE_PER_1M_TOKENS[s.model];
-    const costUsd = price
-      ? Number(((s.inputTokens / 1e6) * price.input + (s.outputTokens / 1e6) * price.output).toFixed(8))
-      : null;
+    let costUsd: number | null = null;
+    if (price) {
+      costUsd = Number(((s.inputTokens / 1e6) * price.input + (s.outputTokens / 1e6) * price.output).toFixed(8));
+    } else {
+      console.warn('[analyze] Modelo sin precio configurado, cost_usd = null:', {
+        source_id: sourceId,
+        model_name: s.model,
+      });
+    }
     const { error: costError } = await admin.from('ai_cost_log').insert({
       source_id: sourceId,
       model_id: s.model,
