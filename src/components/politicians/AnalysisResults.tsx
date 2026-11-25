@@ -35,6 +35,7 @@ interface SourceVerdict {
     verdict: string | null;
     verdict_score: number | null;
     consensus_agreement: number | null;
+    jev_support: number | null;
     requires_review: boolean;
     status: string | null;
     analysis_error: string | null;
@@ -178,7 +179,7 @@ export function AnalysisResults({ sourceId, politicianId, sourceUrl }: AnalysisR
         const supabase = createClient();
         const [reportsRes, sourceRes] = await Promise.all([
             supabase.from('ai_reports').select('*').eq('source_id', sourceId),
-            supabase.from('sources').select('verdict, verdict_score, consensus_agreement, requires_review, status, analysis_error').eq('id', sourceId).maybeSingle(),
+            supabase.from('sources').select('verdict, verdict_score, consensus_agreement, jev_support, requires_review, status, analysis_error').eq('id', sourceId).maybeSingle(),
         ]);
 
         if (reportsRes.error) {
@@ -191,6 +192,7 @@ export function AnalysisResults({ sourceId, politicianId, sourceUrl }: AnalysisR
                 verdict: sourceRes.data.verdict ?? null,
                 verdict_score: sourceRes.data.verdict_score ?? null,
                 consensus_agreement: sourceRes.data.consensus_agreement ?? null,
+                jev_support: sourceRes.data.jev_support ?? null,
                 requires_review: sourceRes.data.requires_review ?? false,
                 status: sourceRes.data.status ?? null,
                 analysis_error: sourceRes.data.analysis_error ?? null,
@@ -452,6 +454,15 @@ export function AnalysisResults({ sourceId, politicianId, sourceUrl }: AnalysisR
     const jevVerification = getJevVerification(reports);
     const jevLabel = jevVerification ? JEV_LABEL[jevVerification.choice] ?? jevVerification.choice : null;
     const jevSoportado = jevVerification?.soportado ?? null;
+    // Dos señales separadas: el acuerdo entre modelos viene de `sources` y el
+    // respaldo de JEV de `sources.jev_support` (con respaldo del reporte antiguo).
+    const jevSupportPercent =
+        typeof verdict?.jev_support === 'number'
+            ? Math.round(verdict.jev_support)
+            : typeof jevSoportado === 'number'
+                ? Math.round(jevSoportado * 100)
+                : null;
+    const jevAmbiguous = verdict?.analysis_error === 'jev_ambiguous';
     // Diagnóstico de cuántos modelos se intentaron (incluye fallbacks) y respondieron.
     const diagnostics = getAnalysisDiagnostics(reports);
     const modelsAttempted = diagnostics?.modelsAttempted ?? EXPECTED_MODELS;
@@ -460,9 +471,11 @@ export function AnalysisResults({ sourceId, politicianId, sourceUrl }: AnalysisR
     const isPartial = Boolean(verdict?.verdict) && validReports.length > 0 && modelsResponded < modelsAttempted;
     const reviewExplanation = isPartial
         ? `Solo respondieron ${modelsResponded} de ${modelsAttempted} modelos. El veredicto es preliminar.`
-        : jevVerification?.choice === "no_soportado"
-            ? "La verificación automática no confirmó la justificación."
-            : "El veredicto requiere revisión.";
+        : jevAmbiguous
+            ? "La verificación automática no pudo confirmar ni descartar la justificación."
+            : jevVerification?.choice === "no_soportado"
+                ? "La verificación automática no confirmó la justificación."
+                : "El veredicto requiere revisión.";
 
     // Calidad de la fuente: si algún modelo reportó que se analizó sin transcripción,
     // se avisa que el resultado puede ser parcial.
@@ -593,15 +606,14 @@ export function AnalysisResults({ sourceId, politicianId, sourceUrl }: AnalysisR
 
                 {typeof verdict?.consensus_agreement === 'number' && (
                     <p className="mt-2 text-sm text-slate-600 dark:text-slate-400">
-                        Acuerdo entre modelos: {Math.round(verdict.consensus_agreement)}% (porcentaje 0–100).
+                        Acuerdo entre modelos: {Math.round(verdict.consensus_agreement)}%.
                     </p>
                 )}
 
-                {typeof jevSoportado === 'number' && (
-                    <p className="mt-2 text-sm text-slate-600 dark:text-slate-400">
-                        Verificación automática: {Math.round(jevSoportado * 100)}% de respaldo.
-                    </p>
-                )}
+                <p className="mt-2 text-sm text-slate-600 dark:text-slate-400">
+                    Respaldo de la verificación:{' '}
+                    {jevSupportPercent !== null ? `${jevSupportPercent}%` : 'sin verificación'}.
+                </p>
 
                 {verdict?.verdict && (isPartial || verdict.requires_review) && (
                     <p className="mt-4 flex items-center gap-2 text-sm text-amber-700 dark:text-amber-300">
