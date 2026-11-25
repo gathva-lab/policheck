@@ -1,5 +1,12 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { askJev, isVerifiable, verifyConsensusVerdict, JEV_MODEL } from './jev';
+import {
+  askJev,
+  isVerifiable,
+  verifyConsensusVerdict,
+  evaluateConsensusVeto,
+  jevSupportFromProbabilities,
+  JEV_MODEL,
+} from './jev';
 
 // Mocks de las dependencias de la ruta /api/analyze. No afectan a JEV, que usa
 // el fetch global mockeado para probar sus propias respuestas.
@@ -163,6 +170,39 @@ describe('askJev', () => {
     const result = await askJev({ verificable: { type: 'noul', instructions: 'x' } }, {}, 'api-key');
 
     expect(result).toBeNull();
+  });
+});
+
+describe('criterio de veto por probabilidades', () => {
+  it('soportado >= 0.5 no veta aunque no_soportado tenga algo de masa', () => {
+    expect(
+      evaluateConsensusVeto({ soportado: 0.5, parcial: 0.38, no_soportado: 0.12 })
+    ).toEqual({ veto: false, reason: null });
+  });
+
+  it('no_soportado >= 0.5 veta de forma firme', () => {
+    expect(evaluateConsensusVeto({ soportado: 0.2, parcial: 0.2, no_soportado: 0.6 })).toEqual({
+      veto: true,
+      reason: 'no_soportado',
+    });
+  });
+
+  it('la zona ambigua (ninguna >= 0.5) veta con jev_ambiguous', () => {
+    expect(
+      evaluateConsensusVeto({ soportado: 0.3, parcial: 0.4, no_soportado: 0.3 })
+    ).toEqual({ veto: true, reason: 'jev_ambiguous' });
+  });
+});
+
+describe('jevSupportFromProbabilities', () => {
+  it('convierte la probabilidad 0–1 al porcentaje 0–100', () => {
+    expect(jevSupportFromProbabilities({ soportado: 0.5 })).toBe(50);
+    expect(jevSupportFromProbabilities({ soportado: 0.28 })).toBe(28);
+  });
+
+  it('devuelve null si no hay probabilidad de soporte', () => {
+    expect(jevSupportFromProbabilities({})).toBeNull();
+    expect(jevSupportFromProbabilities(null)).toBeNull();
   });
 });
 
