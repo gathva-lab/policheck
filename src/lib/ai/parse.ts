@@ -1,5 +1,5 @@
 import { clampScore, isVerdictLabel, type VerdictLabel } from '../veracity';
-import type { ModelReport } from '../consensus';
+import type { ContentNature, ModelReport, ReportQuote } from '../consensus';
 
 export interface ParsedAnalysis {
   report: ModelReport | null;
@@ -43,6 +43,30 @@ function toString(value: unknown): string | null {
   return typeof value === 'string' && value.trim() ? value.trim() : null;
 }
 
+const CONTENT_NATURES: ContentNature[] = ['opinion', 'mixto', 'factual'];
+
+function toContentNature(value: unknown): ContentNature | null {
+  const text = toString(value)?.toLowerCase();
+  return CONTENT_NATURES.find((nature) => nature === text) ?? null;
+}
+
+function toQuotes(value: unknown): ReportQuote[] | null {
+  if (!Array.isArray(value)) return null;
+
+  const quotes: ReportQuote[] = [];
+  for (const item of value) {
+    if (!item || typeof item !== 'object') continue;
+    const obj = item as Record<string, unknown>;
+    const text = toString(obj.text);
+    const assessment = toString(obj.assessment);
+    if (!text || !assessment) continue;
+    quotes.push({ text, assessment });
+    if (quotes.length === 5) break;
+  }
+
+  return quotes.length > 0 ? quotes : null;
+}
+
 export function parseModelOutput(modelName: string, content: string): ParsedAnalysis {
   const raw = extractJsonObject(content);
   if (!raw || typeof raw !== 'object') return { report: null, raw };
@@ -57,6 +81,10 @@ export function parseModelOutput(modelName: string, content: string): ParsedAnal
       veracityScore: toNumber(obj.veracity_score),
       coherenceScore: toNumber(obj.coherence_score),
       summary: toString(obj.summary),
+      plainVerdict: toString(obj.plain_verdict),
+      plainSummary: toString(obj.plain_summary),
+      quotes: toQuotes(obj.quotes),
+      contentNature: toContentNature(obj.content_nature),
     },
     raw,
   };

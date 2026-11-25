@@ -9,6 +9,7 @@ import { Accordion, AccordionItem, AccordionTrigger, AccordionContent } from '@/
 import { Button } from '@/components/ui/button';
 import { AlertTriangle, ShieldCheck, Activity, BrainCircuit, RefreshCw } from 'lucide-react';
 import { displayLabel, colorFromLabel, type VeracityColor } from '@/lib/veracity';
+import type { ContentNature, ReportQuote } from '@/lib/consensus';
 
 interface AIReport {
     id: string;
@@ -68,8 +69,54 @@ function getJevVerification(reports: AIReport[]): JevVerification | null {
     return null;
 }
 
-const BADGE_CLASS: Record<VeracityColor, string> = {
-    green: "bg-emerald-100 text-emerald-800 dark:bg-emerald-900/40 dark:text-emerald-300",
+interface PlainContent {
+    plainVerdict: string | null;
+    plainSummary: string | null;
+    quotes: ReportQuote[] | null;
+    contentNature: ContentNature | null;
+}
+
+const EMPTY_PLAIN_CONTENT: PlainContent = {
+    plainVerdict: null,
+    plainSummary: null,
+    quotes: null,
+    contentNature: null,
+};
+
+function asPlainString(value: unknown): string | null {
+    return typeof value === 'string' && value.trim() ? value.trim() : null;
+}
+
+function asContentNature(value: unknown): ContentNature | null {
+    return value === 'opinion' || value === 'mixto' || value === 'factual' ? value : null;
+}
+
+function asQuotes(value: unknown): ReportQuote[] | null {
+    if (!Array.isArray(value)) return null;
+    const quotes: ReportQuote[] = [];
+    for (const item of value) {
+        if (!item || typeof item !== 'object') continue;
+        const obj = item as Record<string, unknown>;
+        const text = asPlainString(obj.text);
+        const assessment = asPlainString(obj.assessment);
+        if (text && assessment) quotes.push({ text, assessment });
+    }
+    return quotes.length > 0 ? quotes : null;
+}
+
+function readPlainContent(report: AIReport): PlainContent {
+    const raw = report.report_json;
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return EMPTY_PLAIN_CONTENT;
+    const obj = raw as Record<string, unknown>;
+    return {
+        plainVerdict: asPlainString(obj.plain_verdict),
+        plainSummary: asPlainString(obj.plain_summary),
+        quotes: asQuotes(obj.quotes),
+        contentNature: asContentNature(obj.content_nature),
+    };
+}
+
+const BADGE_CLASS: Record<VeracityColor, string> = {    green: "bg-emerald-100 text-emerald-800 dark:bg-emerald-900/40 dark:text-emerald-300",
     yellow: "bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-300",
     orange: "bg-orange-100 text-orange-800 dark:bg-orange-900/40 dark:text-orange-300",
     red: "bg-red-100 text-red-800 dark:bg-red-900/40 dark:text-red-300",
@@ -359,6 +406,11 @@ export function AnalysisResults({ sourceId, politicianId, sourceUrl }: AnalysisR
     const mainSummary = validReports.find(r => r.summary)?.summary;
     const keyClaims = validReports.find(r => r.key_claims && Array.isArray(r.key_claims) && r.key_claims.length > 0)?.key_claims || [];
 
+    // Contenido en lenguaje ciudadano: se toma el primer reporte que lo traiga.
+    const plainContent = validReports
+        .map(readPlainContent)
+        .find((plain) => plain.plainVerdict || plain.plainSummary || plain.contentNature) ?? EMPTY_PLAIN_CONTENT;
+
     // Alertas de sesgo relevantes (filtramos las nulas y vacías, o donde dice "no se detecta gran sesgo")
     const biases = validReports.map(r => r.bias_analysis).filter(b => b && b.length > 20) as string[];
 
@@ -405,6 +457,55 @@ export function AnalysisResults({ sourceId, politicianId, sourceUrl }: AnalysisR
             )}
 
             {error && <p className="text-sm text-red-600 dark:text-red-400">{error}</p>}
+
+            {/* Veredicto en lenguaje ciudadano */}
+            {(plainContent.plainVerdict || plainContent.plainSummary || plainContent.contentNature === 'opinion' || plainContent.quotes) && (
+                <section className="space-y-4 border-b border-slate-200 dark:border-slate-800 pb-6">
+                    <div className="flex flex-col md:flex-row md:items-start md:justify-between gap-3">
+                        {plainContent.plainVerdict && (
+                            <p className="text-2xl md:text-3xl font-black leading-tight text-slate-900 dark:text-slate-100">
+                                {plainContent.plainVerdict}
+                            </p>
+                        )}
+                        <div className="flex items-center gap-3 flex-wrap shrink-0">
+                            {renderVerdictBadge()}
+                            <span className={`text-xl font-bold ${getScoreTextClass(avgVeracity)}`}>
+                                {avgVeracity}%
+                            </span>
+                        </div>
+                    </div>
+
+                    {plainContent.plainSummary && (
+                        <p className="text-base leading-relaxed text-slate-700 dark:text-slate-300">
+                            {plainContent.plainSummary}
+                        </p>
+                    )}
+
+                    {plainContent.contentNature === 'opinion' && (
+                        <div className="flex items-start gap-2 rounded-xl border border-amber-200 dark:border-amber-800/50 bg-amber-50 dark:bg-amber-950/20 p-4 text-sm text-amber-800 dark:text-amber-300">
+                            <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5" />
+                            <p>Este contenido es mayoritariamente opinión o propuesta política, no afirmaciones verificables. El porcentaje no mide si tiene razón.</p>
+                        </div>
+                    )}
+
+                    {plainContent.quotes && plainContent.quotes.length > 0 && (
+                        <div>
+                            <h5 className="font-bold text-xs uppercase tracking-wider text-muted-foreground mb-3">Frases evaluadas</h5>
+                            <ul className="space-y-3">
+                                {plainContent.quotes.map((quote, index) => (
+                                    <li key={index} className="rounded-xl border bg-slate-50 dark:bg-slate-900/50 p-4">
+                                        <p className="italic text-slate-800 dark:text-slate-200 leading-relaxed">“{quote.text}”</p>
+                                        <p className="mt-2 text-sm text-slate-600 dark:text-slate-400 leading-relaxed">
+                                            <span className="font-semibold">Qué se encontró: </span>
+                                            {quote.assessment}
+                                        </p>
+                                    </li>
+                                ))}
+                            </ul>
+                        </div>
+                    )}
+                </section>
+            )}
 
             {/* Cabecera y Promedios */}
             <div>

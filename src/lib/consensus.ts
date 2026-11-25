@@ -1,11 +1,24 @@
 import type { VerdictLabel } from './veracity';
 
+export interface ReportQuote {
+  text: string;
+  assessment: string;
+}
+
+export type ContentNature = 'opinion' | 'mixto' | 'factual';
+
 export interface ModelReport {
   modelName: string;
   verdictLabel: VerdictLabel | null;
   veracityScore: number | null;
   coherenceScore: number | null;
   summary: string | null;
+  // Campos en lenguaje ciudadano. Pueden faltar en modelos antiguos o salidas
+  // incompletas, por eso se toleran como null.
+  plainVerdict: string | null;
+  plainSummary: string | null;
+  quotes: ReportQuote[] | null;
+  contentNature: ContentNature | null;
 }
 
 export interface ConsensusResult {
