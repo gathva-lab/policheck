@@ -7,6 +7,14 @@ import { callModel, type OpenRouterResult } from '@/lib/ai/openrouter';
 import { parseModelOutput, type ParsedAnalysis } from '@/lib/ai/parse';
 import { computeConsensus, type ModelReport } from '@/lib/consensus';
 import { pickTriplet } from '@/lib/ai/model-selection';
+import {
+  isVerifiable,
+  verifyConsensusVerdict,
+  jevCostUsd,
+  JEV_MODEL,
+  type ConsensusVerification,
+  type JevUsage,
+} from '@/lib/ai/jev';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -19,13 +27,16 @@ const MIN_VALID_MODELS = 2;
 const PRICE_PER_1M_TOKENS: Record<string, { input: number; output: number }> = {
   // Eco (operativos)
   'deepseek/deepseek-v3.2': { input: 0.26, output: 0.38 },
+  'deepseek/deepseek-v4.1-flash': { input: 0.051, output: 0.203 },
+  'tencent/hy4-flash': { input: 0.035, output: 0.14 },
   'qwen/qwen3-32b': { input: 0.08, output: 0.28 },
-  'meta-llama/llama-3.3-70b-instruct': { input: 0.71, output: 0.71 },
   // Free
   'nvidia/nemotron-3-ultra-550b-a55b:free': { input: 0, output: 0 },
   'nvidia/nemotron-3.5-lightning:free': { input: 0, output: 0 },
   'google/gemma-4-31b-it:free': { input: 0, output: 0 },
-  'nvidia/nemotron-3-nano-30b-a3b:free': { input: 0, output: 0 },
+  'google/gemma-4-26b-a4b-it:free': { input: 0, output: 0 },
+  // Decisiones (JEV): output gratis
+  'typesafe/jev-1.14': { input: 0.042, output: 0 },
   // Frontier (desactivados por defecto; precios para cuando se activen)
   'anthropic/claude-sonnet-5.5': { input: 2.0, output: 10.0 },
   'anthropic/claude-opus-5.5': { input: 4.0, output: 20.0 },
@@ -68,6 +79,68 @@ function supabaseAdmin() {
   return createAdminClient(process.env.NEXT_PUBLIC_SUPABASE_URL!, process.env.SUPABASE_SERVICE_ROLE_KEY!, {
     auth: { persistSession: false },
   });
+}
+
+// El costo de JEV es solo de entrada: la salida (decisiones) es gratis.
+async function logJevCost(
+  admin: ReturnType<typeof supabaseAdmin>,
+  sourceId: string,
+  usage: JevUsage,
+  latencyMs: number
+) {
+  const { error } = await admin.from('ai_cost_log').insert({
+    source_id: sourceId,
+    model_id: JEV_MODEL,
+    input_tokens: usage.inputTokens,
+    output_tokens: usage.outputTokens,
+    cost_usd: jevCostUsd(usage.inputTokens),
+    latency_ms: latencyMs,
+    tier: 'eco',
+  });
+  if (error) {
+    console.error('[analyze] Error insertando ai_cost_log de JEV:', {
+      source_id: sourceId,
+      error,
+    });
+  }
+}
+
+// Trazabilidad: se guarda la verificación de JEV en el report_json de cada modelo.
+async function saveJevToReports(
+  admin: ReturnType<typeof supabaseAdmin>,
+  sourceId: string,
+  verification: ConsensusVerification
+) {
+  const { data, error } = await admin
+    .from('ai_reports')
+    .select('id, report_json')
+    .eq('source_id', sourceId);
+  if (error) {
+    console.error('[analyze] Error leyendo ai_reports para guardar JEV:', {
+      source_id: sourceId,
+      error,
+    });
+    return;
+  }
+
+  const rows = (data ?? []) as Array<{ id: string; report_json: unknown }>;
+  for (const row of rows) {
+    const reportJson =
+      row.report_json && typeof row.report_json === 'object' && !Array.isArray(row.report_json)
+        ? { ...(row.report_json as Record<string, unknown>), _jev: verification }
+        : { _jev: verification };
+    const { error: updateError } = await admin
+      .from('ai_reports')
+      .update({ report_json: reportJson })
+      .eq('id', row.id);
+    if (updateError) {
+      console.error('[analyze] Error guardando JEV en ai_reports:', {
+        source_id: sourceId,
+        report_id: row.id,
+        error: updateError,
+      });
+    }
+  }
 }
 
 export async function POST(request: Request) {
@@ -214,7 +287,45 @@ export async function POST(request: Request) {
     sourceId = insertedSource.id;
   }
 
-  // 4. Componer el triplete activo: 1 free + 2 eco (familias distintas).
+  // 4. Filtro previo de JEV: el contenido no verificable se descarta sin gastar
+  // tokens de LLM. Si JEV falla (null) se continúa sin filtro (fail-open).
+  const verifiable = await isVerifiable(content.text, content.title, apiKey);
+  if (verifiable) {
+    await logJevCost(admin, sourceId, verifiable.usage, verifiable.latencyMs);
+
+    if (!verifiable.verificable) {
+      const skippedFields = {
+        status: 'verificada',
+        verdict: 'inchequeable',
+        verdict_score: 0,
+        consensus_agreement: 1,
+        requires_review: false,
+      };
+      const { data: skippedSource, error: skipError } = await admin
+        .from('sources')
+        .update(skippedFields)
+        .eq('id', sourceId)
+        .select()
+        .single();
+      if (skipError) {
+        console.error('[analyze] Error marcando fuente no verificable:', {
+          source_id: sourceId,
+          error: skipError,
+        });
+      }
+      return NextResponse.json({
+        source: skippedSource ?? { ...source, ...skippedFields },
+        skipped_llm: true,
+        reason: 'contenido_no_verificable',
+      });
+    }
+  } else {
+    console.warn('[analyze] JEV no disponible; se continúa sin filtro previo (fail-open):', {
+      source_id: sourceId,
+    });
+  }
+
+  // 5. Componer el triplete activo: 1 free + 2 eco (familias distintas).
   // Frontier queda solo como último recurso y no está activo por defecto.
   const { data: configs } = await admin.from('ai_model_config').select('*');
   const configRows = (configs ?? []) as ModelConfigRow[];
@@ -361,17 +472,50 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: 'No se pudo guardar ningún reporte de análisis' }, { status: 500 });
   }
 
-  // 7. Consenso entre modelos
+  // 8. Consenso entre modelos
   const consensus = computeConsensus(reports, MIN_VALID_MODELS);
+
+  // 9. Verificación del consenso con JEV. Solo puede agravar el veredicto a
+  // revisión, nunca mejorarlo.
+  let finalRequiresReview = consensus.requiresReview;
+  let finalStatus = consensus.requiresReview ? 'requiere_revision' : 'verificada';
+  let finalAgreement = consensus.consensusAgreement;
+
+  const consensusSummary =
+    consensus.usedReports
+      .map((report) => report.summary)
+      .filter((summary): summary is string => typeof summary === 'string' && summary.trim().length > 0)
+      .join(' ') || null;
+
+  const jevVerification = await verifyConsensusVerdict(
+    consensus.verdictLabel,
+    consensus.averageVeracity,
+    consensusSummary,
+    content.text,
+    apiKey
+  );
+
+  if (jevVerification) {
+    await logJevCost(admin, sourceId, jevVerification.usage, jevVerification.latencyMs);
+
+    if (jevVerification.choice === 'no_soportado' || jevVerification.confidence < 0.5) {
+      finalRequiresReview = true;
+      finalStatus = 'requiere_revision';
+      const soportado = jevVerification.probabilities.soportado ?? 0;
+      finalAgreement = finalAgreement === null ? soportado : Math.min(finalAgreement, soportado);
+    }
+
+    await saveJevToReports(admin, sourceId, jevVerification);
+  }
 
   const { data: updatedSource, error: updateError } = await admin
     .from('sources')
     .update({
-      status: consensus.requiresReview ? 'requiere_revision' : 'verificada',
+      status: finalStatus,
       verdict: consensus.verdictLabel,
       verdict_score: consensus.averageVeracity,
-      consensus_agreement: consensus.consensusAgreement,
-      requires_review: consensus.requiresReview,
+      consensus_agreement: finalAgreement,
+      requires_review: finalRequiresReview,
     })
     .eq('id', sourceId)
     .select()
@@ -387,6 +531,7 @@ export async function POST(request: Request) {
   return NextResponse.json({
     source: updatedSource ?? source,
     consensus,
+    jevVerification,
     analyzedBy: parsedModels.length,
   });
 }
