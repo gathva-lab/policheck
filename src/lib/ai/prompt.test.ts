@@ -28,4 +28,15 @@ describe('FEVER_SYSTEM_PROMPT: lenguaje ciudadano', () => {
     expect(FEVER_SYSTEM_PROMPT).toContain('Neutralidad');
     expect(FEVER_SYSTEM_PROMPT).toContain('solo sobre su relación con la evidencia');
   });
+
+  it('limita quotes a 3 y pide un análisis de máximo 1200 tokens', () => {
+    expect(FEVER_SYSTEM_PROMPT).toContain('entre 1 y 3');
+    expect(FEVER_SYSTEM_PROMPT).toContain('máximo 3');
+    expect(FEVER_SYSTEM_PROMPT).not.toContain('entre 1 y 5');
+    expect(FEVER_SYSTEM_PROMPT).toContain('1 200 tokens de salida');
+  });
+
+  it('limita plain_summary a 2 frases en contenidos de más de 30 minutos', () => {
+    expect(FEVER_SYSTEM_PROMPT).toContain('supera los 30 minutos');
+  });
 });
