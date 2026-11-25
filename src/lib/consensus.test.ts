@@ -50,14 +50,35 @@ describe('computeConsensus', () => {
     expect(result.averageVeracity).toBe(79);
   });
 
-  it('con menos de 2 modelos válidos exige revisión (sin veredicto público)', () => {
+  it('con un solo reporte conserva su veredicto como parcial y exige revisión', () => {
     const result = computeConsensus([
       report({ modelName: 'a', verdictLabel: 'verdadero', veracityScore: 95 }),
       report({ modelName: 'b', verdictLabel: null, veracityScore: null }),
     ]);
 
     expect(result.requiresReview).toBe(true);
+    expect(result.verdictLabel).toBe('verdadero');
+    expect(result.consensusAgreement).toBe(0);
+    expect(result.partial).toBe(true);
+  });
+
+  it('con dos reportes coincidentes no marca el resultado como parcial', () => {
+    const result = computeConsensus([
+      report({ modelName: 'a', verdictLabel: 'verdadero', veracityScore: 95 }),
+      report({ modelName: 'b', verdictLabel: 'verdadero', veracityScore: 90 }),
+    ]);
+
+    expect(result.requiresReview).toBe(false);
+    expect(result.partial).toBe(false);
+  });
+
+  it('sin reportes válidos no inventa veredicto ni marca parcial', () => {
+    const result = computeConsensus([]);
+
+    expect(result.requiresReview).toBe(true);
     expect(result.verdictLabel).toBeNull();
+    expect(result.consensusAgreement).toBeNull();
+    expect(result.partial).toBe(false);
   });
 
   it('descarta del consenso modelos cuya justificación contradice su veredicto', () => {
