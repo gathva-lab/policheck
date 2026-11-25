@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import { createClient as createAdminClient } from '@supabase/supabase-js';
 import { createClient } from '@/utils/supabase/server';
-import { extractArticle, extractYoutube, extractDomain, isYoutubeUrl } from '@/lib/ai/extract';
+import { extractArticle, extractYoutube, extractDomain, isYoutubeUrl, type ExtractedContent } from '@/lib/ai/extract';
 import { FEVER_SYSTEM_PROMPT } from '@/lib/ai/prompt';
 import { callModel, type OpenRouterResult } from '@/lib/ai/openrouter';
 import { parseModelOutput, type ParsedAnalysis } from '@/lib/ai/parse';
@@ -124,7 +124,7 @@ export async function POST(request: Request) {
   const admin = supabaseAdmin();
 
   // 1. Extracción de contenido (artículo o YouTube)
-  let content;
+  let content: ExtractedContent;
   try {
     content = isYoutubeUrl(url) ? await extractYoutube(url) : await extractArticle(url);
   } catch (error) {
@@ -275,11 +275,23 @@ export async function POST(request: Request) {
 
   for (const s of parsedModels) {
     const raw = s.parsed.raw;
+    // Se propaga la calidad de la fuente para que la UI advierta cuando un video
+    // se analizó solo con su descripción (sin transcripción).
+    const reportJson =
+      raw && typeof raw === 'object' && !Array.isArray(raw)
+        ? {
+            ...(raw as Record<string, unknown>),
+            source_quality: {
+              transcript_used: content.transcriptUsed,
+              transcript_words: content.transcriptWords,
+            },
+          }
+        : raw;
     reportInserts += 1;
     const { error: reportError } = await admin.from('ai_reports').insert({
       source_id: sourceId,
       model_name: s.model,
-      report_json: raw,
+      report_json: reportJson,
       summary: s.parsed.report?.summary,
       veracity_score: s.parsed.report?.veracityScore,
       coherence_score: s.parsed.report?.coherenceScore,
