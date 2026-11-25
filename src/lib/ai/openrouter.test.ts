@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { callModel } from './openrouter';
+import { callModel, modelTimeoutFor } from './openrouter';
 
 function jsonResponse(body: unknown, status = 200): Response {
   return {
@@ -8,6 +8,13 @@ function jsonResponse(body: unknown, status = 200): Response {
     json: async () => body,
   } as Response;
 }
+
+describe('modelTimeoutFor', () => {
+  it('usa 45 s para fuentes cortas y 75 s para fuentes largas', () => {
+    expect(modelTimeoutFor(3000)).toBe(45000);
+    expect(modelTimeoutFor(12000)).toBe(75000);
+  });
+});
 
 describe('callModel', () => {
   beforeEach(() => {

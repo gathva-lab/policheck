@@ -95,7 +95,10 @@ vi.mock('@/lib/ai/extract', () => ({
   MIN_CONTENT_CHARS: 200,
 }));
 
-vi.mock('@/lib/ai/openrouter', () => ({ callModel: h.callModel }));
+vi.mock('@/lib/ai/openrouter', () => ({
+  callModel: h.callModel,
+  modelTimeoutFor: (inputChars: number) => (inputChars < 6000 ? 45000 : 75000),
+}));
 
 vi.mock('@/lib/ai/jev', () => ({
   isVerifiable: h.isVerifiable,
@@ -425,5 +428,75 @@ describe('/api/analyze fallbacks', () => {
     expect(
       costRows.filter((row) => row.model_id === 'nvidia/nemotron-3-ultra-550b-a55b:free')
     ).toHaveLength(1);
+  });
+});
+
+describe('/api/analyze cortacircuitos de timeout', () => {
+  it('un timeout no dispara el fallback del modelo', async () => {
+    process.env.OPENROUTER_API_KEY = 'test-key';
+    process.env.SUPABASE_SERVICE_ROLE_KEY = 'test-service-role';
+    process.env.NEXT_PUBLIC_SUPABASE_URL = 'https://supabase.test';
+
+    const fallbackModel = 'deepseek/deepseek-v4.1-fallback';
+    h.setModelConfigs([
+      { id: 'free', model_id: 'nvidia/nemotron-3-ultra-550b-a55b:free', tier: 'free', is_active: true, priority: 50, fallback_id: 'fb' },
+      { id: 'deepseek', model_id: 'deepseek/deepseek-v4.1-flash', tier: 'eco', is_active: true, priority: 10, fallback_id: null },
+      { id: 'tencent', model_id: 'tencent/hy4-flash', tier: 'eco', is_active: true, priority: 10, fallback_id: null },
+      { id: 'fb', model_id: fallbackModel, tier: 'eco', is_active: true, priority: 99, fallback_id: null },
+    ]);
+
+    h.inserts.length = 0;
+    h.callModel.mockReset();
+    h.isVerifiable.mockReset();
+    h.verifyConsensusVerdict.mockReset();
+    h.extractArticle.mockReset();
+    h.extractArticle.mockResolvedValue({
+      title: 'Nota',
+      text: 'contenido factual suficiente '.repeat(20),
+      sourceType: 'articulo_noticia',
+      transcriptUsed: false,
+      transcriptWords: 0,
+    });
+    h.isVerifiable.mockResolvedValue(null);
+    h.verifyConsensusVerdict.mockResolvedValue(null);
+    h.callModel.mockImplementation(async (
+      modelId: string,
+      _apiKey: string,
+      _prompt: string,
+      _content: string,
+      onFailure?: (reason: string) => void
+    ) => {
+      if (modelId === 'nvidia/nemotron-3-ultra-550b-a55b:free') {
+        onFailure?.('timeout');
+        return null;
+      }
+      return {
+        model: modelId,
+        content:
+          '{"verdict_label":"discutible","veracity_score":65,"coherence_score":70,"summary":"ok"}',
+        inputTokens: 20,
+        outputTokens: 10,
+        latencyMs: 5,
+      };
+    });
+
+    const { POST } = await import('@/app/api/analyze/route');
+    const request = new Request('http://localhost/api/analyze', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url: 'https://ejemplo.cl/nota', politicianId: 'politico-1' }),
+    });
+
+    await POST(request);
+
+    const called = h.callModel.mock.calls.map((call) => call[0]);
+    expect(called).not.toContain(fallbackModel);
+    expect(called.filter((modelId) => modelId === 'nvidia/nemotron-3-ultra-550b-a55b:free')).toHaveLength(1);
+
+    const timeoutRows = h.inserts
+      .filter((insert) => insert.table === 'ai_cost_log')
+      .map((insert) => insert.values)
+      .filter((values) => values.error_reason === 'timeout');
+    expect(timeoutRows).toHaveLength(1);
   });
 });

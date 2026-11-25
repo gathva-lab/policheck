@@ -10,7 +10,12 @@ import {
   type ExtractedContent,
 } from '@/lib/ai/extract';
 import { FEVER_SYSTEM_PROMPT } from '@/lib/ai/prompt';
-import { callModel, type CallFailureReason, type OpenRouterResult } from '@/lib/ai/openrouter';
+import {
+  callModel,
+  modelTimeoutFor,
+  type CallFailureReason,
+  type OpenRouterResult,
+} from '@/lib/ai/openrouter';
 import { parseModelOutput, type ParsedAnalysis } from '@/lib/ai/parse';
 import { computeConsensus, type ModelReport } from '@/lib/consensus';
 import { buildAttempts, pickTriplet, type AttemptCandidate } from '@/lib/ai/model-selection';
@@ -458,6 +463,16 @@ export async function POST(request: Request) {
   // siguiente activo del mismo tier que no forme parte del triplete.
   const attempts: AttemptCandidate[][] = buildAttempts(triplet, configRows);
 
+  // Fuentes largas reciben más tiempo de generación.
+  const modelTimeoutMs = modelTimeoutFor(content.text.length);
+  // El fallback solo tiene sentido si el fallo fue transitorio o de salida.
+  // Un timeout no lo dispara: el proveedor ya está lento con ese tamaño.
+  const FALLBACK_REASONS: ReadonlySet<CallFailureReason> = new Set([
+    'http_429',
+    'http_4xx',
+    'empty',
+  ]);
+
   // 5. Llamada multi-modelo en paralelo con fallback por modelo.
   // Cada intento conserva el motivo si no llega a producir un reporte.
   const settled = await Promise.allSettled(
@@ -472,7 +487,8 @@ export async function POST(request: Request) {
           content.text,
           (reason) => {
             candidateFailure = reason;
-          }
+          },
+          { timeoutMs: modelTimeoutMs }
         );
         if (result) {
           const parsed = parseModelOutput(result.model, result.content);
@@ -482,11 +498,14 @@ export async function POST(request: Request) {
             failures,
           };
         }
+        const reason = candidateFailure ?? 'http_error';
         failures.push({
           modelId: candidate.modelId,
           tier: candidate.tier,
-          reason: candidateFailure ?? 'http_error',
+          reason,
         });
+        // Cortacircuitos: solo se intenta el fallback en fallos transitorios.
+        if (!FALLBACK_REASONS.has(reason)) break;
       }
       return {
         call: null,
