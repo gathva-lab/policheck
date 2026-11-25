@@ -1,10 +1,26 @@
-import { describe, it, expect, vi } from 'vitest';
+import { beforeEach, describe, it, expect, vi } from 'vitest';
 
 const h = vi.hoisted(() => {
   type Chain = Record<string, (...args: unknown[]) => unknown>;
 
   const updates: Array<{ table: string; values: Record<string, unknown> }> = [];
   const inserts: Array<{ table: string; values: Record<string, unknown> }> = [];
+
+  interface TestModelConfig {
+    id: string;
+    model_id: string;
+    tier: string;
+    is_active: boolean;
+    priority?: number;
+    fallback_id?: string | null;
+  }
+
+  const defaultModels: TestModelConfig[] = [
+    { id: 'free', model_id: 'nvidia/nemotron-3-ultra-550b-a55b:free', tier: 'free', is_active: true, priority: 50, fallback_id: null },
+    { id: 'deepseek', model_id: 'deepseek/deepseek-v4.1-flash', tier: 'eco', is_active: true, priority: 10, fallback_id: null },
+    { id: 'tencent', model_id: 'tencent/hy4-flash', tier: 'eco', is_active: true, priority: 10, fallback_id: null },
+  ];
+  let modelConfigs = defaultModels;
 
   function result(table: string, methods: string[]): unknown {
     const has = (method: string) => methods.includes(method);
@@ -18,14 +34,7 @@ const h = vi.hoisted(() => {
     }
     if (table === 'media_outlets') return { data: { id: 'outlet-1' }, error: null };
     if (table === 'ai_model_config') {
-      return {
-        data: [
-          { id: 'free', model_id: 'nvidia/nemotron-3-ultra-550b-a55b:free', tier: 'free', is_active: true, priority: 50, fallback_id: null },
-          { id: 'deepseek', model_id: 'deepseek/deepseek-v4.1-flash', tier: 'eco', is_active: true, priority: 10, fallback_id: null },
-          { id: 'tencent', model_id: 'tencent/hy4-flash', tier: 'eco', is_active: true, priority: 10, fallback_id: null },
-        ],
-        error: null,
-      };
+      return { data: modelConfigs, error: null };
     }
     if (table === 'ai_reports') return { data: [], error: null, count: 0 };
     if (table === 'ai_cost_log') return { error: null };
@@ -53,6 +62,12 @@ const h = vi.hoisted(() => {
     updates,
     inserts,
     chain,
+    setModelConfigs: (rows: TestModelConfig[]) => {
+      modelConfigs = rows;
+    },
+    resetModelConfigs: () => {
+      modelConfigs = defaultModels;
+    },
     extractArticle: vi.fn(),
     extractYoutube: vi.fn(),
     callModel: vi.fn(),
@@ -88,6 +103,12 @@ vi.mock('@/lib/ai/jev', () => ({
   jevCostUsd: () => 0,
   JEV_MODEL: 'typesafe/jev-1.14',
 }));
+
+beforeEach(() => {
+  h.resetModelConfigs();
+  h.inserts.length = 0;
+  h.updates.length = 0;
+});
 
 describe('/api/analyze validación de contenido mínimo', () => {
   it('devuelve 422, marca requiere_revision y no llama a JEV ni a modelos', async () => {
@@ -190,5 +211,129 @@ describe('/api/analyze diagnóstico de modelos sin reporte', () => {
     expect(failureRows.map((row) => row.error_reason).sort()).toEqual(['empty', 'parse_failed', 'timeout']);
     expect(failureRows.every((row) => row.cost_usd === 0)).toBe(true);
     expect(failureRows.every((row) => row.input_tokens === 0 && row.output_tokens === 0)).toBe(true);
+  });
+});
+
+describe('/api/analyze fallbacks', () => {
+  it('descarta un fallback inactivo y no lo llama', async () => {
+    process.env.OPENROUTER_API_KEY = 'test-key';
+    process.env.SUPABASE_SERVICE_ROLE_KEY = 'test-service-role';
+    process.env.NEXT_PUBLIC_SUPABASE_URL = 'https://supabase.test';
+
+    h.setModelConfigs([
+      { id: 'free', model_id: 'nvidia/nemotron-3-ultra-550b-a55b:free', tier: 'free', is_active: true, priority: 50, fallback_id: 'inactive' },
+      { id: 'deepseek', model_id: 'deepseek/deepseek-v4.1-flash', tier: 'eco', is_active: true, priority: 10, fallback_id: null },
+      { id: 'tencent', model_id: 'tencent/hy4-flash', tier: 'eco', is_active: true, priority: 10, fallback_id: null },
+      { id: 'inactive', model_id: 'deepseek/deepseek-v3.2', tier: 'eco', is_active: false, priority: 5, fallback_id: null },
+    ]);
+
+    h.callModel.mockReset();
+    h.isVerifiable.mockReset();
+    h.verifyConsensusVerdict.mockReset();
+    h.extractArticle.mockReset();
+    h.extractArticle.mockResolvedValue({
+      title: 'Nota',
+      text: 'contenido factual suficiente '.repeat(20),
+      sourceType: 'articulo_noticia',
+      transcriptUsed: false,
+      transcriptWords: 0,
+    });
+    h.isVerifiable.mockResolvedValue(null);
+    h.verifyConsensusVerdict.mockResolvedValue(null);
+    h.callModel.mockImplementation(async (
+      _modelId: string,
+      _apiKey: string,
+      _prompt: string,
+      _content: string,
+      onFailure?: (reason: string) => void
+    ) => {
+      onFailure?.('empty');
+      return null;
+    });
+
+    const { POST } = await import('@/app/api/analyze/route');
+    const request = new Request('http://localhost/api/analyze', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url: 'https://ejemplo.cl/nota', politicianId: 'politico-1' }),
+    });
+
+    await POST(request);
+
+    const called = h.callModel.mock.calls.map((call) => call[0]);
+    expect(called).not.toContain('deepseek/deepseek-v3.2');
+    expect(called).toHaveLength(3);
+  });
+
+  it('registra dos filas con el mismo source_id cuando se usa un fallback', async () => {
+    process.env.OPENROUTER_API_KEY = 'test-key';
+    process.env.SUPABASE_SERVICE_ROLE_KEY = 'test-service-role';
+    process.env.NEXT_PUBLIC_SUPABASE_URL = 'https://supabase.test';
+
+    const fallbackModel = 'deepseek/deepseek-v4.1-fallback';
+    h.setModelConfigs([
+      { id: 'free', model_id: 'nvidia/nemotron-3-ultra-550b-a55b:free', tier: 'free', is_active: true, priority: 50, fallback_id: 'fb' },
+      { id: 'deepseek', model_id: 'deepseek/deepseek-v4.1-flash', tier: 'eco', is_active: true, priority: 10, fallback_id: null },
+      { id: 'tencent', model_id: 'tencent/hy4-flash', tier: 'eco', is_active: true, priority: 10, fallback_id: null },
+      { id: 'fb', model_id: fallbackModel, tier: 'eco', is_active: true, priority: 99, fallback_id: null },
+    ]);
+
+    h.callModel.mockReset();
+    h.isVerifiable.mockReset();
+    h.verifyConsensusVerdict.mockReset();
+    h.extractArticle.mockReset();
+    h.extractArticle.mockResolvedValue({
+      title: 'Nota',
+      text: 'contenido factual suficiente '.repeat(20),
+      sourceType: 'articulo_noticia',
+      transcriptUsed: false,
+      transcriptWords: 0,
+    });
+    h.isVerifiable.mockResolvedValue(null);
+    h.verifyConsensusVerdict.mockResolvedValue(null);
+    h.callModel.mockImplementation(async (
+      modelId: string,
+      _apiKey: string,
+      _prompt: string,
+      _content: string,
+      onFailure?: (reason: string) => void
+    ) => {
+      if (modelId === fallbackModel) {
+        return {
+          model: modelId,
+          content: '{"verdict_label":"verdadero","veracity_score":80,"coherence_score":80,"summary":"ok"}',
+          inputTokens: 20,
+          outputTokens: 10,
+          latencyMs: 5,
+        };
+      }
+      onFailure?.('empty');
+      return null;
+    });
+
+    const { POST } = await import('@/app/api/analyze/route');
+    const request = new Request('http://localhost/api/analyze', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url: 'https://ejemplo.cl/nota', politicianId: 'politico-1' }),
+    });
+
+    await POST(request);
+
+    const costRows = h.inserts
+      .filter((insert) => insert.table === 'ai_cost_log')
+      .map((insert) => insert.values);
+
+    const primaryRow = costRows.find((row) => row.model_id === 'nvidia/nemotron-3-ultra-550b-a55b:free');
+    const fallbackRow = costRows.find((row) => row.model_id === fallbackModel);
+
+    expect(primaryRow?.error_reason).toBe('empty');
+    expect(fallbackRow).toBeDefined();
+    expect(fallbackRow?.error_reason).toBeUndefined();
+    expect(primaryRow?.source_id).toBe('source-1');
+    expect(fallbackRow?.source_id).toBe('source-1');
+    expect(
+      costRows.filter((row) => row.model_id === 'nvidia/nemotron-3-ultra-550b-a55b:free')
+    ).toHaveLength(1);
   });
 });

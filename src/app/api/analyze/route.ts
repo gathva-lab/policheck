@@ -13,7 +13,7 @@ import { FEVER_SYSTEM_PROMPT } from '@/lib/ai/prompt';
 import { callModel, type CallFailureReason, type OpenRouterResult } from '@/lib/ai/openrouter';
 import { parseModelOutput, type ParsedAnalysis } from '@/lib/ai/parse';
 import { computeConsensus, type ModelReport } from '@/lib/consensus';
-import { pickTriplet } from '@/lib/ai/model-selection';
+import { buildAttempts, pickTriplet, type AttemptCandidate } from '@/lib/ai/model-selection';
 import { normalizeUrl } from '@/lib/url';
 import {
   isVerifiable,
@@ -67,9 +67,16 @@ interface SuccessfulCall extends OpenRouterResult {
   parsed: ParsedAnalysis;
 }
 
+interface AttemptFailure {
+  modelId: string;
+  tier: string;
+  reason: CallFailureReason;
+}
+
 interface AttemptOutcome {
   call: SuccessfulCall | null;
   failureReason: CallFailureReason | null;
+  failures: AttemptFailure[];
 }
 
 function claimsToArray(raw: unknown): string[] | null {
@@ -425,7 +432,6 @@ export async function POST(request: Request) {
   // Frontier queda solo como último recurso y no está activo por defecto.
   const { data: configs } = await admin.from('ai_model_config').select('*');
   const configRows = (configs ?? []) as ModelConfigRow[];
-  const configById = new Map(configRows.map((c) => [c.id, c]));
   const triplet = pickTriplet(configRows);
 
   if (triplet.length === 0) {
@@ -447,22 +453,15 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: 'No hay modelos configurados para el análisis' }, { status: 500 });
   }
 
-  const attempts: Array<{ modelId: string; tier: string }[]> = triplet.map((cfg) => {
-    const list: Array<{ modelId: string; tier: string }> = [{ modelId: cfg.model_id, tier: cfg.tier }];
-    if (cfg.fallback_id) {
-      const fallback = configById.get(cfg.fallback_id);
-      if (fallback?.model_id && !list.some((c) => c.modelId === fallback.model_id)) {
-        list.push({ modelId: fallback.model_id, tier: fallback.tier ?? 'eco' });
-      }
-    }
-    return list;
-  });
+  // El fallback solo se usa si está activo. Si está inactivo se busca el
+  // siguiente activo del mismo tier que no forme parte del triplete.
+  const attempts: AttemptCandidate[][] = buildAttempts(triplet, configRows);
 
   // 5. Llamada multi-modelo en paralelo con fallback por modelo.
   // Cada intento conserva el motivo si no llega a producir un reporte.
   const settled = await Promise.allSettled(
     attempts.map(async (candidates): Promise<AttemptOutcome> => {
-      let failureReason: CallFailureReason | null = null;
+      const failures: AttemptFailure[] = [];
       for (const candidate of candidates) {
         let candidateFailure: CallFailureReason | null = null;
         const result = await callModel(
@@ -479,17 +478,32 @@ export async function POST(request: Request) {
           return {
             call: { ...result, tier: candidate.tier, parsed },
             failureReason: parsed.report === null ? 'parse_failed' : null,
+            failures,
           };
         }
-        failureReason = candidateFailure ?? 'http_error';
+        failures.push({
+          modelId: candidate.modelId,
+          tier: candidate.tier,
+          reason: candidateFailure ?? 'http_error',
+        });
       }
-      return { call: null, failureReason };
+      return {
+        call: null,
+        failureReason: failures.length > 0 ? failures[failures.length - 1].reason : 'http_error',
+        failures,
+      };
     })
   );
 
-  const outcomes: AttemptOutcome[] = settled.map((s) =>
-    s.status === 'fulfilled' ? s.value : { call: null, failureReason: 'http_error' }
-  );
+  const outcomes: AttemptOutcome[] = settled.map((s, index) => {
+    if (s.status === 'fulfilled') return s.value;
+    const primary = attempts[index]?.[0];
+    return {
+      call: null,
+      failureReason: 'http_error',
+      failures: primary ? [{ ...primary, reason: 'http_error' }] : [],
+    };
+  });
 
   const successes: SuccessfulCall[] = outcomes
     .map((outcome) => outcome.call)
@@ -506,38 +520,53 @@ export async function POST(request: Request) {
     });
   }
 
-  // 5b. Diagnóstico: todo modelo del triplete que no produjo reporte deja una
-  // fila en ai_cost_log con coste cero y el motivo del fallo.
+  // 5b. Trazabilidad: todo modelo que no produjo reporte deja una fila en
+  // ai_cost_log con coste cero y el motivo. Si se usó un fallback quedan dos
+  // filas (la del principal que falló y la del fallback) con el mismo source_id.
   for (let index = 0; index < outcomes.length; index += 1) {
     const outcome = outcomes[index];
-    if (outcome.call && outcome.call.parsed.report !== null) continue;
+    if (outcome.call && outcome.call.parsed.report !== null && outcome.failures.length === 0) continue;
 
-    const primary = attempts[index]?.[0];
-    if (!primary) continue;
-    const reason = outcome.failureReason ?? 'http_error';
-
-    console.error('[analyze] Modelo sin reporte:', {
-      source_id: sourceId,
-      model_id: primary.modelId,
-      reason,
-    });
-
-    const { error: failedCostError } = await admin.from('ai_cost_log').insert({
-      source_id: sourceId,
-      model_id: primary.modelId,
-      input_tokens: 0,
-      output_tokens: 0,
-      cost_usd: 0,
-      latency_ms: 0,
-      tier: primary.tier,
-      error_reason: reason,
-    });
-    if (failedCostError) {
-      console.error('[analyze] Error insertando ai_cost_log de modelo fallido:', {
-        source_id: sourceId,
-        model_id: primary.modelId,
-        error: failedCostError,
+    const failures: AttemptFailure[] = [...outcome.failures];
+    if (outcome.call && outcome.call.parsed.report === null) {
+      failures.push({
+        modelId: outcome.call.model,
+        tier: outcome.call.tier,
+        reason: outcome.failureReason ?? 'parse_failed',
       });
+    }
+    // Red de seguridad: ningún modelo del triplete puede quedar sin fila.
+    if (failures.length === 0) {
+      const primary = attempts[index]?.[0];
+      if (primary) {
+        failures.push({ ...primary, reason: outcome.failureReason ?? 'http_error' });
+      }
+    }
+
+    for (const failure of failures) {
+      console.error('[analyze] Modelo sin reporte:', {
+        source_id: sourceId,
+        model_id: failure.modelId,
+        reason: failure.reason,
+      });
+
+      const { error: failedCostError } = await admin.from('ai_cost_log').insert({
+        source_id: sourceId,
+        model_id: failure.modelId,
+        input_tokens: 0,
+        output_tokens: 0,
+        cost_usd: 0,
+        latency_ms: 0,
+        tier: failure.tier,
+        error_reason: failure.reason,
+      });
+      if (failedCostError) {
+        console.error('[analyze] Error insertando ai_cost_log de modelo fallido:', {
+          source_id: sourceId,
+          model_id: failure.modelId,
+          error: failedCostError,
+        });
+      }
     }
   }
 
