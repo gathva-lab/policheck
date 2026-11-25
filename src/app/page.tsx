@@ -2,6 +2,8 @@ import { supabase } from "@/lib/supabase";
 import { PoliticianCard } from "@/components/politicians/PoliticianCard";
 import { Search, Users2, ShieldCheck } from "lucide-react";
 
+export const dynamic = "force-dynamic";
+
 interface PoliticianRow {
   id: string;
   full_name: string;

@@ -220,9 +220,13 @@ export async function POST(request: Request) {
   const reports: ModelReport[] = parsedModels.map((s) => s.parsed.report as ModelReport);
 
   // 6. Persistir reportes por modelo + costos
+  let reportInserts = 0;
+  let reportInsertFailures = 0;
+
   for (const s of parsedModels) {
     const raw = s.parsed.raw;
-    await admin.from('ai_reports').insert({
+    reportInserts += 1;
+    const { error: reportError } = await admin.from('ai_reports').insert({
       source_id: sourceId,
       model_name: s.model,
       report_json: raw,
@@ -232,12 +236,20 @@ export async function POST(request: Request) {
       bias_analysis: biasFromRaw(raw),
       key_claims: claimsToArray(raw),
     });
+    if (reportError) {
+      reportInsertFailures += 1;
+      console.error('[analyze] Error insertando ai_reports:', {
+        source_id: sourceId,
+        model_name: s.model,
+        error: reportError,
+      });
+    }
 
     const price = PRICE_PER_1M_TOKENS[s.model];
     const costUsd = price
       ? Number(((s.inputTokens / 1e6) * price.input + (s.outputTokens / 1e6) * price.output).toFixed(8))
       : null;
-    await admin.from('ai_cost_log').insert({
+    const { error: costError } = await admin.from('ai_cost_log').insert({
       source_id: sourceId,
       model_id: s.model,
       input_tokens: s.inputTokens,
@@ -246,6 +258,29 @@ export async function POST(request: Request) {
       latency_ms: s.latencyMs,
       tier: s.tier,
     });
+    if (costError) {
+      // El cost log es telemetría: no bloquea el flujo, solo se registra.
+      console.error('[analyze] Error insertando ai_cost_log:', {
+        source_id: sourceId,
+        model_name: s.model,
+        error: costError,
+      });
+    }
+  }
+
+  // Si ningún reporte llegó a guardarse, no fingir éxito: marcar para revisión y fallar.
+  if (reportInserts > 0 && reportInsertFailures === reportInserts) {
+    const { error: reviewError } = await admin
+      .from('sources')
+      .update({ status: 'requiere_revision', requires_review: true })
+      .eq('id', sourceId);
+    if (reviewError) {
+      console.error('[analyze] Error marcando fuente requires_review:', {
+        source_id: sourceId,
+        error: reviewError,
+      });
+    }
+    return NextResponse.json({ error: 'No se pudo guardar ningún reporte de análisis' }, { status: 500 });
   }
 
   // 7. Consenso entre modelos
