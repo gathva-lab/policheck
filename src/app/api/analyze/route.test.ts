@@ -1,4 +1,5 @@
 import { beforeEach, describe, it, expect, vi } from 'vitest';
+import { JEV_MODEL } from '@/lib/ai/jev';
 
 const h = vi.hoisted(() => {
   type Chain = Record<string, (...args: unknown[]) => unknown>;
@@ -73,6 +74,7 @@ const h = vi.hoisted(() => {
     callModel: vi.fn(),
     isVerifiable: vi.fn(),
     verifyConsensusVerdict: vi.fn(),
+    jevConsensus: vi.fn(),
   };
 });
 
@@ -105,7 +107,8 @@ vi.mock('@/lib/ai/jev', async (importOriginal) => {
   return {
     ...actual,
     isVerifiable: h.isVerifiable,
-    verifyConsensusVerdict: h.verifyConsensusVerdict,
+    verifyConsensusVerdict: h.jevConsensus,
+    jevConsensus: h.jevConsensus,
     jevCostUsd: () => 0,
   };
 });
@@ -114,6 +117,8 @@ beforeEach(() => {
   h.resetModelConfigs();
   h.inserts.length = 0;
   h.updates.length = 0;
+  h.jevConsensus.mockReset();
+  h.jevConsensus.mockResolvedValue(null);
 });
 
 describe('/api/analyze validación de contenido mínimo', () => {
@@ -170,7 +175,7 @@ describe('/api/analyze diagnóstico de modelos sin reporte', () => {
     h.inserts.length = 0;
     h.callModel.mockReset();
     h.isVerifiable.mockReset();
-    h.verifyConsensusVerdict.mockReset();
+    h.jevConsensus.mockReset();
     h.extractArticle.mockReset();
     h.extractArticle.mockResolvedValue({
       title: 'Nota',
@@ -180,7 +185,7 @@ describe('/api/analyze diagnóstico de modelos sin reporte', () => {
       transcriptWords: 0,
     });
     h.isVerifiable.mockResolvedValue(null);
-    h.verifyConsensusVerdict.mockResolvedValue(null);
+    h.jevConsensus.mockResolvedValue(null);
     h.callModel.mockImplementation(async (
       modelId: string,
       _apiKey: string,
@@ -229,7 +234,7 @@ describe('/api/analyze señales separadas (acuerdo vs respaldo JEV)', () => {
     h.updates.length = 0;
     h.callModel.mockReset();
     h.isVerifiable.mockReset();
-    h.verifyConsensusVerdict.mockReset();
+    h.jevConsensus.mockReset();
     h.extractArticle.mockReset();
     h.extractArticle.mockResolvedValue({
       title: 'Nota',
@@ -239,7 +244,7 @@ describe('/api/analyze señales separadas (acuerdo vs respaldo JEV)', () => {
       transcriptWords: 0,
     });
     h.isVerifiable.mockResolvedValue(null);
-    h.verifyConsensusVerdict.mockResolvedValue({
+    h.jevConsensus.mockResolvedValue({
       choice: 'soportado',
       confidence: 0.25,
       probabilities: { soportado: 0.5, parcial: 0.38, no_soportado: 0.12 },
@@ -324,7 +329,7 @@ describe('/api/analyze señales separadas (acuerdo vs respaldo JEV)', () => {
     h.updates.length = 0;
     h.callModel.mockReset();
     h.isVerifiable.mockReset();
-    h.verifyConsensusVerdict.mockReset();
+    h.jevConsensus.mockReset();
     h.extractArticle.mockReset();
     h.extractArticle.mockResolvedValue({
       title: 'Nota',
@@ -334,7 +339,7 @@ describe('/api/analyze señales separadas (acuerdo vs respaldo JEV)', () => {
       transcriptWords: 0,
     });
     h.isVerifiable.mockResolvedValue(null);
-    h.verifyConsensusVerdict.mockResolvedValue({
+    h.jevConsensus.mockResolvedValue({
       choice: 'parcial',
       confidence: 0.9,
       probabilities: { soportado: 0.3, parcial: 0.4, no_soportado: 0.3 },
@@ -367,6 +372,125 @@ describe('/api/analyze señales separadas (acuerdo vs respaldo JEV)', () => {
     expect(finalUpdate?.values.requires_review).toBe(true);
     expect(finalUpdate?.values.analysis_error).toBe('jev_ambiguous');
   });
+
+  it('marca jev_degraded cuando el consenso tuvo menos de 3 corridas', async () => {
+    process.env.OPENROUTER_API_KEY = 'test-key';
+    process.env.SUPABASE_SERVICE_ROLE_KEY = 'test-service-role';
+    process.env.NEXT_PUBLIC_SUPABASE_URL = 'https://supabase.test';
+
+    h.updates.length = 0;
+    h.callModel.mockReset();
+    h.isVerifiable.mockReset();
+    h.jevConsensus.mockReset();
+    h.extractArticle.mockReset();
+    h.extractArticle.mockResolvedValue({
+      title: 'Nota',
+      text: 'contenido factual suficiente '.repeat(20),
+      sourceType: 'articulo_noticia',
+      transcriptUsed: false,
+      transcriptWords: 0,
+    });
+    h.isVerifiable.mockResolvedValue(null);
+    h.jevConsensus.mockResolvedValue({
+      choice: 'soportado',
+      confidence: 0.8,
+      probabilities: { soportado: 0.5, parcial: 0.1, no_soportado: 0.4 },
+      usage: { inputTokens: 300, outputTokens: 0, totalTokens: 300 },
+      latencyMs: 30,
+      runs: 3,
+      degraded: true,
+      spread: 0.4,
+      perRun: [
+        { choice: 'soportado', soportado: 0.3, confidence: 0.8 },
+        { choice: 'soportado', soportado: 0.7, confidence: 0.8 },
+      ],
+    });
+    h.callModel.mockImplementation(async (modelId: string) => ({
+      model: modelId,
+      content:
+        '{"verdict_label":"discutible","veracity_score":65,"coherence_score":70,"summary":"ok"}',
+      inputTokens: 20,
+      outputTokens: 10,
+      latencyMs: 5,
+    }));
+
+    const { POST } = await import('@/app/api/analyze/route');
+    const request = new Request('http://localhost/api/analyze', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url: 'https://ejemplo.cl/nota', politicianId: 'politico-1' }),
+    });
+
+    await POST(request);
+
+    const finalUpdate = h.updates.find(
+      (update) => update.table === 'sources' && 'consensus_agreement' in update.values
+    );
+    expect(finalUpdate?.values.requires_review).toBe(true);
+    expect(finalUpdate?.values.status).toBe('requiere_revision');
+    expect(finalUpdate?.values.analysis_error).toBe('jev_degraded');
+  });
+
+  it('registra el coste de las 3 corridas sumado en una sola fila', async () => {
+    process.env.OPENROUTER_API_KEY = 'test-key';
+    process.env.SUPABASE_SERVICE_ROLE_KEY = 'test-service-role';
+    process.env.NEXT_PUBLIC_SUPABASE_URL = 'https://supabase.test';
+
+    h.inserts.length = 0;
+    h.callModel.mockReset();
+    h.isVerifiable.mockReset();
+    h.jevConsensus.mockReset();
+    h.extractArticle.mockReset();
+    h.extractArticle.mockResolvedValue({
+      title: 'Nota',
+      text: 'contenido factual suficiente '.repeat(20),
+      sourceType: 'articulo_noticia',
+      transcriptUsed: false,
+      transcriptWords: 0,
+    });
+    h.isVerifiable.mockResolvedValue(null);
+    h.jevConsensus.mockResolvedValue({
+      choice: 'soportado',
+      confidence: 0.8,
+      probabilities: { soportado: 0.5, parcial: 0.1, no_soportado: 0.4 },
+      usage: { inputTokens: 600, outputTokens: 0, totalTokens: 600 },
+      latencyMs: 30,
+      runs: 3,
+      degraded: false,
+      spread: 0.1,
+      perRun: [
+        { choice: 'soportado', soportado: 0.5, confidence: 0.8 },
+        { choice: 'soportado', soportado: 0.5, confidence: 0.8 },
+        { choice: 'soportado', soportado: 0.5, confidence: 0.8 },
+      ],
+    });
+    h.callModel.mockImplementation(async (modelId: string) => ({
+      model: modelId,
+      content:
+        '{"verdict_label":"discutible","veracity_score":65,"coherence_score":70,"summary":"ok"}',
+      inputTokens: 20,
+      outputTokens: 10,
+      latencyMs: 5,
+    }));
+
+    const { POST } = await import('@/app/api/analyze/route');
+    const request = new Request('http://localhost/api/analyze', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url: 'https://ejemplo.cl/nota', politicianId: 'politico-1' }),
+    });
+
+    await POST(request);
+
+    const jevRows = h.inserts
+      .filter((insert) => insert.table === 'ai_cost_log')
+      .map((insert) => insert.values)
+      .filter((values) => values.model_id === JEV_MODEL);
+
+    expect(jevRows).toHaveLength(1);
+    expect(jevRows[0].input_tokens).toBe(600);
+    expect(jevRows[0].output_tokens).toBe(0);
+  });
 });
 
 describe('/api/analyze fallbacks', () => {
@@ -384,7 +508,7 @@ describe('/api/analyze fallbacks', () => {
 
     h.callModel.mockReset();
     h.isVerifiable.mockReset();
-    h.verifyConsensusVerdict.mockReset();
+    h.jevConsensus.mockReset();
     h.extractArticle.mockReset();
     h.extractArticle.mockResolvedValue({
       title: 'Nota',
@@ -394,7 +518,7 @@ describe('/api/analyze fallbacks', () => {
       transcriptWords: 0,
     });
     h.isVerifiable.mockResolvedValue(null);
-    h.verifyConsensusVerdict.mockResolvedValue(null);
+    h.jevConsensus.mockResolvedValue(null);
     h.callModel.mockImplementation(async (
       _modelId: string,
       _apiKey: string,
@@ -435,7 +559,7 @@ describe('/api/analyze fallbacks', () => {
 
     h.callModel.mockReset();
     h.isVerifiable.mockReset();
-    h.verifyConsensusVerdict.mockReset();
+    h.jevConsensus.mockReset();
     h.extractArticle.mockReset();
     h.extractArticle.mockResolvedValue({
       title: 'Nota',
@@ -445,7 +569,7 @@ describe('/api/analyze fallbacks', () => {
       transcriptWords: 0,
     });
     h.isVerifiable.mockResolvedValue(null);
-    h.verifyConsensusVerdict.mockResolvedValue(null);
+    h.jevConsensus.mockResolvedValue(null);
     h.callModel.mockImplementation(async (
       modelId: string,
       _apiKey: string,
@@ -510,7 +634,7 @@ describe('/api/analyze cortacircuitos de timeout', () => {
     h.inserts.length = 0;
     h.callModel.mockReset();
     h.isVerifiable.mockReset();
-    h.verifyConsensusVerdict.mockReset();
+    h.jevConsensus.mockReset();
     h.extractArticle.mockReset();
     h.extractArticle.mockResolvedValue({
       title: 'Nota',
@@ -520,7 +644,7 @@ describe('/api/analyze cortacircuitos de timeout', () => {
       transcriptWords: 0,
     });
     h.isVerifiable.mockResolvedValue(null);
-    h.verifyConsensusVerdict.mockResolvedValue(null);
+    h.jevConsensus.mockResolvedValue(null);
     h.callModel.mockImplementation(async (
       modelId: string,
       _apiKey: string,
