@@ -9,8 +9,9 @@ export const JEV_OUTPUT_FREE = true;
 
 const JEV_TIMEOUT_MS = 8000;
 const JEV_VERIFIABLE_THRESHOLD = 0.35;
-// Bajo este umbral la verificación insegura veta el consenso. Se mantiene bajo
-// para que una JEV dubitativa no tumbe un consenso sólido.
+// Constante histórica: el veto ya NO depende de `confidence` sino de las
+// probabilidades (`evaluateConsensusVeto`). Se conserva exportada por
+// compatibilidad, pero no debe usarse para vetar.
 export const JEV_VETO_CONFIDENCE = 0.4;
 const JEV_EXCERPT_CHARS = 6000;
 // La verificación post-consenso usa el texto completo que vieron los modelos,
@@ -77,6 +78,41 @@ export interface ConsensusVerification {
   probabilities: Record<string, number>;
   usage: JevUsage;
   latencyMs: number;
+}
+
+export type JevVetoReason = 'no_soportado' | 'jev_ambiguous';
+
+export interface JevVetoDecision {
+  veto: boolean;
+  reason: JevVetoReason | null;
+}
+
+// Respaldo de JEV en porcentaje 0–100 para la columna `jev_support`.
+// Devuelve null cuando la probabilidad no viene o no es un número válido.
+export function jevSupportFromProbabilities(
+  probabilities: Record<string, number> | null | undefined
+): number | null {
+  const value = Number(probabilities?.soportado);
+  return Number.isFinite(value) ? Math.round(value * 100) : null;
+}
+
+// Criterio de veto por probabilidades (más robusto que por `confidence`):
+// - no_soportado >= 0.5: veto firme.
+// - soportado >= 0.5: no veta, aunque la confidence sea baja.
+// - cualquier otro caso: zona ambigua, veta con la nota `jev_ambiguous`.
+export function evaluateConsensusVeto(
+  probabilities: Record<string, number> | null | undefined
+): JevVetoDecision {
+  const soportado = Number(probabilities?.soportado);
+  const noSoportado = Number(probabilities?.no_soportado);
+
+  if (Number.isFinite(noSoportado) && noSoportado >= 0.5) {
+    return { veto: true, reason: 'no_soportado' };
+  }
+  if (Number.isFinite(soportado) && soportado >= 0.5) {
+    return { veto: false, reason: null };
+  }
+  return { veto: true, reason: 'jev_ambiguous' };
 }
 
 function toNumber(value: unknown): number {

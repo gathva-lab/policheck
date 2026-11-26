@@ -100,13 +100,15 @@ vi.mock('@/lib/ai/openrouter', () => ({
   modelTimeoutFor: (inputChars: number) => (inputChars < 6000 ? 45000 : 75000),
 }));
 
-vi.mock('@/lib/ai/jev', () => ({
-  isVerifiable: h.isVerifiable,
-  verifyConsensusVerdict: h.verifyConsensusVerdict,
-  jevCostUsd: () => 0,
-  JEV_MODEL: 'typesafe/jev-1.14',
-  JEV_VETO_CONFIDENCE: 0.4,
-}));
+vi.mock('@/lib/ai/jev', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/lib/ai/jev')>();
+  return {
+    ...actual,
+    isVerifiable: h.isVerifiable,
+    verifyConsensusVerdict: h.verifyConsensusVerdict,
+    jevCostUsd: () => 0,
+  };
+});
 
 beforeEach(() => {
   h.resetModelConfigs();
@@ -218,8 +220,8 @@ describe('/api/analyze diagnóstico de modelos sin reporte', () => {
   });
 });
 
-describe('/api/analyze agreement en escala 0–100', () => {
-  it('con soportado 0.28 y consenso 100 guarda consensus_agreement 28', async () => {
+describe('/api/analyze señales separadas (acuerdo vs respaldo JEV)', () => {
+  it('3 modelos coincidentes con soportado 0.50 guardan agreement 100 y jev_support 50', async () => {
     process.env.OPENROUTER_API_KEY = 'test-key';
     process.env.SUPABASE_SERVICE_ROLE_KEY = 'test-service-role';
     process.env.NEXT_PUBLIC_SUPABASE_URL = 'https://supabase.test';
@@ -238,9 +240,9 @@ describe('/api/analyze agreement en escala 0–100', () => {
     });
     h.isVerifiable.mockResolvedValue(null);
     h.verifyConsensusVerdict.mockResolvedValue({
-      choice: 'no_soportado',
-      confidence: 0.9,
-      probabilities: { soportado: 0.28, parcial: 0.2, no_soportado: 0.52 },
+      choice: 'soportado',
+      confidence: 0.25,
+      probabilities: { soportado: 0.5, parcial: 0.38, no_soportado: 0.12 },
       usage: { inputTokens: 100, outputTokens: 0, totalTokens: 100 },
       latencyMs: 1,
     });
@@ -265,7 +267,13 @@ describe('/api/analyze agreement en escala 0–100', () => {
     const finalUpdate = h.updates.find(
       (update) => update.table === 'sources' && 'consensus_agreement' in update.values
     );
-    expect(finalUpdate?.values.consensus_agreement).toBe(28);
+    // El acuerdo entre modelos es unánime (100) y no se mezcla con JEV.
+    expect(finalUpdate?.values.consensus_agreement).toBe(100);
+    // El respaldo de JEV se guarda aparte en escala 0–100: 0.50 → 50.
+    expect(finalUpdate?.values.jev_support).toBe(50);
+    // soportado >= 0.5 no veta aunque la confidence sea baja (0.25).
+    expect(finalUpdate?.values.requires_review).toBe(false);
+    expect(finalUpdate?.values.analysis_error).toBeNull();
   });
 
   it('el atajo de contenido no verificable guarda consensus_agreement 100', async () => {
@@ -305,6 +313,59 @@ describe('/api/analyze agreement en escala 0–100', () => {
         update.table === 'sources' && update.values.status === 'verificada' && 'consensus_agreement' in update.values
     );
     expect(skippedUpdate?.values.consensus_agreement).toBe(100);
+    expect(skippedUpdate?.values.jev_support).toBeNull();
+  });
+
+  it('la zona ambigua veta con la nota jev_ambiguous', async () => {
+    process.env.OPENROUTER_API_KEY = 'test-key';
+    process.env.SUPABASE_SERVICE_ROLE_KEY = 'test-service-role';
+    process.env.NEXT_PUBLIC_SUPABASE_URL = 'https://supabase.test';
+
+    h.updates.length = 0;
+    h.callModel.mockReset();
+    h.isVerifiable.mockReset();
+    h.verifyConsensusVerdict.mockReset();
+    h.extractArticle.mockReset();
+    h.extractArticle.mockResolvedValue({
+      title: 'Nota',
+      text: 'contenido factual suficiente '.repeat(20),
+      sourceType: 'articulo_noticia',
+      transcriptUsed: false,
+      transcriptWords: 0,
+    });
+    h.isVerifiable.mockResolvedValue(null);
+    h.verifyConsensusVerdict.mockResolvedValue({
+      choice: 'parcial',
+      confidence: 0.9,
+      probabilities: { soportado: 0.3, parcial: 0.4, no_soportado: 0.3 },
+      usage: { inputTokens: 100, outputTokens: 0, totalTokens: 100 },
+      latencyMs: 1,
+    });
+    h.callModel.mockImplementation(async (modelId: string) => ({
+      model: modelId,
+      content:
+        '{"verdict_label":"discutible","veracity_score":65,"coherence_score":70,"summary":"ok"}',
+      inputTokens: 20,
+      outputTokens: 10,
+      latencyMs: 5,
+    }));
+
+    const { POST } = await import('@/app/api/analyze/route');
+    const request = new Request('http://localhost/api/analyze', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url: 'https://ejemplo.cl/nota', politicianId: 'politico-1' }),
+    });
+
+    await POST(request);
+
+    const finalUpdate = h.updates.find(
+      (update) => update.table === 'sources' && 'consensus_agreement' in update.values
+    );
+    expect(finalUpdate?.values.consensus_agreement).toBe(100);
+    expect(finalUpdate?.values.jev_support).toBe(30);
+    expect(finalUpdate?.values.requires_review).toBe(true);
+    expect(finalUpdate?.values.analysis_error).toBe('jev_ambiguous');
   });
 });
 

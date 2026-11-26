@@ -24,8 +24,9 @@ import {
   isVerifiable,
   verifyConsensusVerdict,
   jevCostUsd,
+  jevSupportFromProbabilities,
+  evaluateConsensusVeto,
   JEV_MODEL,
-  JEV_VETO_CONFIDENCE,
   type ConsensusVerification,
   type JevUsage,
 } from '@/lib/ai/jev';
@@ -77,6 +78,8 @@ interface AttemptFailure {
   modelId: string;
   tier: string;
   reason: CallFailureReason;
+  // Latencia real transcurrida hasta el fallo (incluye timeouts).
+  latencyMs: number;
 }
 
 interface AttemptOutcome {
@@ -267,6 +270,7 @@ export async function POST(request: Request) {
         verdict: null,
         verdict_score: null,
         consensus_agreement: null,
+        jev_support: null,
         requires_review: false,
         status: 'procesando',
         analysis_stage: 'extraccion',
@@ -403,7 +407,9 @@ export async function POST(request: Request) {
         verdict: 'inchequeable',
         verdict_score: 0,
         // La columna consensus_agreement se guarda como porcentaje 0–100: 100 = acuerdo total.
+        // No hubo verificación de JEV, así que jev_support queda sin valor.
         consensus_agreement: 100,
+        jev_support: null,
         requires_review: false,
         analysis_stage: 'completo',
         analysis_finished_at: new Date().toISOString(),
@@ -481,13 +487,15 @@ export async function POST(request: Request) {
       const failures: AttemptFailure[] = [];
       for (const candidate of candidates) {
         let candidateFailure: CallFailureReason | null = null;
+        let candidateLatencyMs = 0;
         const result = await callModel(
           candidate.modelId,
           apiKey,
           FEVER_SYSTEM_PROMPT,
           content.text,
-          (reason) => {
+          (reason, latencyMs) => {
             candidateFailure = reason;
+            candidateLatencyMs = latencyMs;
           },
           { timeoutMs: modelTimeoutMs }
         );
@@ -504,6 +512,7 @@ export async function POST(request: Request) {
           modelId: candidate.modelId,
           tier: candidate.tier,
           reason,
+          latencyMs: candidateLatencyMs,
         });
         // Cortacircuitos: solo se intenta el fallback en fallos transitorios.
         if (!FALLBACK_REASONS.has(reason)) break;
@@ -522,7 +531,7 @@ export async function POST(request: Request) {
     return {
       call: null,
       failureReason: 'http_error',
-      failures: primary ? [{ ...primary, reason: 'http_error' }] : [],
+      failures: primary ? [{ ...primary, reason: 'http_error', latencyMs: 0 }] : [],
     };
   });
 
@@ -554,13 +563,14 @@ export async function POST(request: Request) {
         modelId: outcome.call.model,
         tier: outcome.call.tier,
         reason: outcome.failureReason ?? 'parse_failed',
+        latencyMs: outcome.call.latencyMs,
       });
     }
     // Red de seguridad: ningún modelo del triplete puede quedar sin fila.
     if (failures.length === 0) {
       const primary = attempts[index]?.[0];
       if (primary) {
-        failures.push({ ...primary, reason: outcome.failureReason ?? 'http_error' });
+        failures.push({ ...primary, reason: outcome.failureReason ?? 'http_error', latencyMs: 0 });
       }
     }
 
@@ -577,7 +587,7 @@ export async function POST(request: Request) {
         input_tokens: 0,
         output_tokens: 0,
         cost_usd: 0,
-        latency_ms: 0,
+        latency_ms: failure.latencyMs,
         tier: failure.tier,
         error_reason: failure.reason,
       });
@@ -707,7 +717,11 @@ export async function POST(request: Request) {
   // revisión, nunca mejorarlo.
   let finalRequiresReview = consensus.requiresReview;
   let finalStatus = consensus.requiresReview ? 'requiere_revision' : 'verificada';
-  let finalAgreement = consensus.consensusAgreement;
+  // Dos señales independientes: acuerdo entre modelos y respaldo de JEV.
+  const finalAgreement = consensus.consensusAgreement;
+  let finalJevSupport: number | null = null;
+  // Nota de diagnóstico cuando el veto viene de la zona ambigua de JEV.
+  let finalAnalysisError: string | null = null;
 
   const consensusSummary =
     consensus.usedReports
@@ -726,14 +740,16 @@ export async function POST(request: Request) {
   if (jevVerification) {
     await logJevCost(admin, sourceId, jevVerification.usage, jevVerification.latencyMs);
 
-    if (jevVerification.choice === 'no_soportado' || jevVerification.confidence < JEV_VETO_CONFIDENCE) {
+    // Respaldo de JEV (escala 0–1 → porcentaje 0–100). No se mezcla con el
+    // acuerdo entre modelos: cada señal se guarda en su propia columna.
+    finalJevSupport = jevSupportFromProbabilities(jevVerification.probabilities);
+
+    const veto = evaluateConsensusVeto(jevVerification.probabilities);
+    if (veto.veto) {
       finalRequiresReview = true;
       finalStatus = 'requiere_revision';
-      // consensus_agreement se guarda como porcentaje 0–100, pero las
-      // probabilidades de JEV vienen en escala 0–1: se convierten a porcentaje.
-      const soportado = jevVerification.probabilities.soportado;
-      if (typeof soportado === 'number') {
-        finalAgreement = Math.min(finalAgreement ?? 100, Math.round(soportado * 100));
+      if (veto.reason === 'jev_ambiguous') {
+        finalAnalysisError = 'jev_ambiguous';
       }
     }
 
@@ -749,10 +765,11 @@ export async function POST(request: Request) {
       verdict: consensus.verdictLabel,
       verdict_score: consensus.averageVeracity,
       consensus_agreement: finalAgreement,
+      jev_support: finalJevSupport,
       requires_review: finalRequiresReview,
       analysis_stage: 'completo',
       analysis_finished_at: new Date().toISOString(),
-      analysis_error: null,
+      analysis_error: finalAnalysisError,
     })
     .eq('id', sourceId)
     .select()
