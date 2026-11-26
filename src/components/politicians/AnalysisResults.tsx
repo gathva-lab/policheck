@@ -29,6 +29,11 @@ interface JevVerification {
     confidence: number;
     // Probabilidad 0–1 de que la justificación esté respaldada. Null si JEV no la envió.
     soportado: number | null;
+    // Consenso de JEV: corridas solicitadas, corridas válidas y variación del soportado.
+    runs: number | null;
+    degraded: boolean;
+    spread: number | null;
+    validRuns: number;
 }
 
 interface SourceVerdict {
@@ -74,10 +79,17 @@ function getJevVerification(reports: AIReport[]): JevVerification | null {
         const probabilities = (jev as { probabilities?: Record<string, unknown> }).probabilities;
         const soportadoRaw = probabilities?.soportado;
         const soportado = Number(soportadoRaw);
+        const perRun = (jev as { perRun?: unknown }).perRun;
+        const runsRaw = Number((jev as { runs?: unknown }).runs);
+        const spreadRaw = Number((jev as { spread?: unknown }).spread);
         return {
             choice,
             confidence: Number((jev as { confidence?: unknown }).confidence ?? 0),
             soportado: Number.isFinite(soportado) ? soportado : null,
+            runs: Number.isFinite(runsRaw) && runsRaw > 0 ? runsRaw : null,
+            degraded: (jev as { degraded?: unknown }).degraded === true,
+            spread: Number.isFinite(spreadRaw) ? spreadRaw : null,
+            validRuns: Array.isArray(perRun) ? perRun.length : 1,
         };
     }
     return null;
@@ -614,6 +626,23 @@ export function AnalysisResults({ sourceId, politicianId, sourceUrl }: AnalysisR
                     Respaldo de la verificación:{' '}
                     {jevSupportPercent !== null ? `${jevSupportPercent}%` : 'sin verificación'}.
                 </p>
+
+                {jevVerification && (
+                    <p className="mt-2 text-sm text-slate-600 dark:text-slate-400">
+                        Estabilidad de la verificación: {jevVerification.validRuns} de{' '}
+                        {jevVerification.runs ?? jevVerification.validRuns} verificaciones
+                        {jevVerification.spread !== null
+                            ? ` (variación ${jevVerification.spread.toFixed(2)}${jevVerification.spread > 0.25 ? ' — resultado inestable' : ''})`
+                            : ''}.
+                    </p>
+                )}
+
+                {jevVerification?.spread !== null && jevVerification?.spread !== undefined && jevVerification.spread > 0.25 && (
+                    <p className="mt-2 flex items-center gap-2 text-sm text-amber-700 dark:text-amber-300">
+                        <Activity className="h-4 w-4 shrink-0" />
+                        La verificación automática dio resultados dispares en esta fuente; el veredicto puede ser revisado.
+                    </p>
+                )}
 
                 {verdict?.verdict && (isPartial || verdict.requires_review) && (
                     <p className="mt-4 flex items-center gap-2 text-sm text-amber-700 dark:text-amber-300">

@@ -22,12 +22,12 @@ import { buildAttempts, pickTriplet, type AttemptCandidate } from '@/lib/ai/mode
 import { normalizeUrl } from '@/lib/url';
 import {
   isVerifiable,
-  verifyConsensusVerdict,
+  jevConsensus,
   jevCostUsd,
   jevSupportFromProbabilities,
   evaluateConsensusVeto,
   JEV_MODEL,
-  type ConsensusVerification,
+  type JevConsensusResult,
   type JevUsage,
 } from '@/lib/ai/jev';
 
@@ -138,7 +138,7 @@ async function logJevCost(
 async function saveJevToReports(
   admin: ReturnType<typeof supabaseAdmin>,
   sourceId: string,
-  verification: ConsensusVerification
+  verification: JevConsensusResult
 ) {
   const { data, error } = await admin
     .from('ai_reports')
@@ -729,7 +729,10 @@ export async function POST(request: Request) {
       .filter((summary): summary is string => typeof summary === 'string' && summary.trim().length > 0)
       .join(' ') || null;
 
-  const jevVerification = await verifyConsensusVerdict(
+  // Consenso de JEV: 3 corridas en paralelo agregadas por mediana, porque las
+  // probabilidades crudas del modelo varían entre tiradas. El filtro previo
+  // (`isVerifiable`) sigue siendo una sola llamada: es barato y no decide.
+  const jevVerification = await jevConsensus(
     consensus.verdictLabel,
     consensus.averageVeracity,
     consensusSummary,
@@ -738,12 +741,14 @@ export async function POST(request: Request) {
   );
 
   if (jevVerification) {
+    // El coste de las 3 corridas se registra sumado en una sola fila.
     await logJevCost(admin, sourceId, jevVerification.usage, jevVerification.latencyMs);
 
     // Respaldo de JEV (escala 0–1 → porcentaje 0–100). No se mezcla con el
     // acuerdo entre modelos: cada señal se guarda en su propia columna.
     finalJevSupport = jevSupportFromProbabilities(jevVerification.probabilities);
 
+    // El veto usa las probabilidades agregadas (mediana), no una sola corrida.
     const veto = evaluateConsensusVeto(jevVerification.probabilities);
     if (veto.veto) {
       finalRequiresReview = true;
@@ -751,6 +756,13 @@ export async function POST(request: Request) {
       if (veto.reason === 'jev_ambiguous') {
         finalAnalysisError = 'jev_ambiguous';
       }
+    }
+
+    // Menos de 3 respuestas válidas: el resultado es preliminar.
+    if (jevVerification.degraded) {
+      finalRequiresReview = true;
+      finalStatus = 'requiere_revision';
+      finalAnalysisError = 'jev_degraded';
     }
 
     await saveJevToReports(admin, sourceId, jevVerification);

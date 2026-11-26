@@ -3,6 +3,7 @@ import {
   askJev,
   isVerifiable,
   verifyConsensusVerdict,
+  jevConsensus,
   evaluateConsensusVeto,
   jevSupportFromProbabilities,
   JEV_MODEL,
@@ -271,6 +272,113 @@ describe('verifyConsensusVerdict', () => {
     expect(body.state.extracto).toHaveLength(12000);
     expect(body.state.extracto.startsWith('INICIO-')).toBe(true);
     expect(body.state.extracto.endsWith('-FINAL')).toBe(true);
+  });
+});
+
+describe('jevConsensus', () => {
+  function soporteResponse(soportado: number, confidence = 0.8, choice = 'soportado') {
+    return mockJson({
+      soporte: {
+        choice,
+        confidence,
+        probabilities: {
+          soportado,
+          parcial: 0.1,
+          no_soportado: Math.max(0, 1 - soportado - 0.1),
+        },
+      },
+      usage: { input_tokens: 100 },
+    });
+  }
+
+  it('3 corridas 0.5 / 0.2 / 0.5 → mediana 0.5 y no veta', async () => {
+    h.fetchMock
+      .mockResolvedValueOnce(soporteResponse(0.5))
+      .mockResolvedValueOnce(soporteResponse(0.2))
+      .mockResolvedValueOnce(soporteResponse(0.5));
+
+    const result = await jevConsensus('verdadero', 80, 'Justificación', 'extracto', 'api-key');
+
+    expect(result?.probabilities.soportado).toBe(0.5);
+    expect(evaluateConsensusVeto(result?.probabilities).veto).toBe(false);
+    expect(result?.degraded).toBe(false);
+    expect(result?.runs).toBe(3);
+    expect(result?.perRun).toHaveLength(3);
+    // spread = max(0.5) - min(0.2)
+    expect(result?.spread).toBeCloseTo(0.3, 5);
+  });
+
+  it('3 corridas 0.2 / 0.2 / 0.6 → mediana 0.2 y veta', async () => {
+    h.fetchMock
+      .mockResolvedValueOnce(soporteResponse(0.2, 0.8, 'no_soportado'))
+      .mockResolvedValueOnce(soporteResponse(0.2, 0.8, 'no_soportado'))
+      .mockResolvedValueOnce(soporteResponse(0.6, 0.8, 'soportado'));
+
+    const result = await jevConsensus('discutible', 60, 'Justificación', 'extracto', 'api-key');
+
+    expect(result?.probabilities.soportado).toBe(0.2);
+    expect(evaluateConsensusVeto(result?.probabilities)).toEqual({
+      veto: true,
+      reason: 'no_soportado',
+    });
+  });
+
+  it('1 de 3 falla → usa 2 corridas y marca degraded', async () => {
+    h.fetchMock
+      .mockResolvedValueOnce(soporteResponse(0.4))
+      .mockResolvedValueOnce(mockJson({}, 500))
+      .mockResolvedValueOnce(soporteResponse(0.6));
+
+    const result = await jevConsensus('verdadero', 80, 'Justificación', 'extracto', 'api-key');
+
+    expect(result).not.toBeNull();
+    expect(result?.degraded).toBe(true);
+    expect(result?.runs).toBe(3);
+    expect(result?.perRun).toHaveLength(2);
+    expect(result?.probabilities.soportado).toBe(0.5);
+  });
+
+  it('3 de 3 fallan → null', async () => {
+    h.fetchMock
+      .mockResolvedValueOnce(mockJson({}, 500))
+      .mockResolvedValueOnce(mockJson({}, 500))
+      .mockResolvedValueOnce(mockJson({}, 500));
+
+    const result = await jevConsensus('verdadero', 80, 'Justificación', 'extracto', 'api-key');
+
+    expect(result).toBeNull();
+  });
+
+  it('suma el coste de las 3 corridas', async () => {
+    const withUsage = (inputTokens: number) =>
+      mockJson({
+        soporte: {
+          choice: 'soportado',
+          confidence: 0.8,
+          probabilities: { soportado: 0.6, parcial: 0.2, no_soportado: 0.2 },
+        },
+        usage: { input_tokens: inputTokens },
+      });
+    h.fetchMock
+      .mockResolvedValueOnce(withUsage(100))
+      .mockResolvedValueOnce(withUsage(200))
+      .mockResolvedValueOnce(withUsage(300));
+
+    const result = await jevConsensus('verdadero', 80, 'Justificación', 'extracto', 'api-key');
+
+    expect(result?.usage.inputTokens).toBe(600);
+    expect(result?.usage.totalTokens).toBe(600);
+  });
+
+  it('la moda desempata por mayor confidence', async () => {
+    h.fetchMock
+      .mockResolvedValueOnce(soporteResponse(0.5, 0.4, 'parcial'))
+      .mockResolvedValueOnce(soporteResponse(0.5, 0.9, 'soportado'));
+
+    const result = await jevConsensus('verdadero', 80, 'Justificación', 'extracto', 'api-key', 2);
+
+    expect(result?.choice).toBe('soportado');
+    expect(result?.confidence).toBeCloseTo(0.65, 5);
   });
 });
 
