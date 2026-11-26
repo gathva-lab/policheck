@@ -80,6 +80,16 @@ export interface ConsensusVerification {
   latencyMs: number;
 }
 
+// Resultado del consenso de JEV: agrega varias corridas del mismo veredicto.
+// `runs` es el total solicitado y `perRun` las corridas válidas; `degraded`
+// indica que se agregó con menos corridas de las pedidas.
+export interface JevConsensusResult extends ConsensusVerification {
+  runs: number;
+  degraded: boolean;
+  spread: number;
+  perRun: Array<{ choice: string; soportado: number; confidence: number }>;
+}
+
 export type JevVetoReason = 'no_soportado' | 'jev_ambiguous';
 
 export interface JevVetoDecision {
@@ -264,5 +274,104 @@ export async function verifyConsensusVerdict(
     probabilities: answer.probabilities ?? {},
     usage: result.usage,
     latencyMs: result.latencyMs,
+  };
+}
+
+function median(values: number[]): number {
+  if (values.length === 0) return 0;
+  const sorted = [...values].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 0 ? (sorted[mid - 1] + sorted[mid]) / 2 : sorted[mid];
+}
+
+// La probabilidad cruda de JEV no es una frecuencia calibrada: varía entre
+// corridas (0.50 vs 0.21 para el mismo texto). Se agrega por mediana porque la
+// mediana ignora valores extremos aislados y refleja la tendencia central de
+// las corridas sin dejar que una sola tirada decida el veredicto.
+export async function jevConsensus(
+  verdictLabel: string | null,
+  verdictScore: number | null,
+  summary: string | null,
+  verificationText: string,
+  apiKey: string,
+  runs = 3
+): Promise<JevConsensusResult | null> {
+  const requested = Math.max(1, Math.floor(runs));
+  const results = await Promise.all(
+    Array.from({ length: requested }, () =>
+      verifyConsensusVerdict(verdictLabel, verdictScore, summary, verificationText, apiKey)
+    )
+  );
+
+  // Fail-open: se descartan las corridas nulas (fallo/timeout).
+  const valid = results.filter((result): result is ConsensusVerification => result !== null);
+  if (valid.length === 0) return null;
+
+  const soportados = valid.map((result) => toNumber(result.probabilities.soportado));
+  const confidences = valid.map((result) => toNumber(result.confidence));
+
+  // Moda con desempate por mayor confidence: la opción más repetida gana; si
+  // hay empate, se queda con la corrida que más segura estaba de su choice.
+  const choiceStats = new Map<string, { count: number; maxConfidence: number }>();
+  for (const result of valid) {
+    const confidence = toNumber(result.confidence);
+    const current = choiceStats.get(result.choice);
+    if (current) {
+      current.count += 1;
+      current.maxConfidence = Math.max(current.maxConfidence, confidence);
+    } else {
+      choiceStats.set(result.choice, { count: 1, maxConfidence: confidence });
+    }
+  }
+  let choice = valid[0].choice;
+  let bestCount = -1;
+  let bestConfidence = -1;
+  for (const [candidate, stats] of choiceStats) {
+    if (
+      stats.count > bestCount ||
+      (stats.count === bestCount && stats.maxConfidence > bestConfidence)
+    ) {
+      choice = candidate;
+      bestCount = stats.count;
+      bestConfidence = stats.maxConfidence;
+    }
+  }
+
+  // Mediana por cada clave de probabilidades presente en las corridas válidas.
+  const keys = new Set<string>();
+  for (const result of valid) {
+    for (const key of Object.keys(result.probabilities)) keys.add(key);
+  }
+  const probabilities: Record<string, number> = {};
+  for (const key of keys) {
+    probabilities[key] = median(valid.map((result) => toNumber(result.probabilities[key])));
+  }
+
+  // El coste real es la suma de las corridas, pero se registra en una sola fila.
+  const usage = valid.reduce<JevUsage>(
+    (acc, result) => ({
+      inputTokens: acc.inputTokens + result.usage.inputTokens,
+      outputTokens: acc.outputTokens + result.usage.outputTokens,
+      totalTokens: acc.totalTokens + result.usage.totalTokens,
+    }),
+    { inputTokens: 0, outputTokens: 0, totalTokens: 0 }
+  );
+  // Las llamadas corren en paralelo: la latencia de pared es la máxima.
+  const latencyMs = valid.reduce((max, result) => Math.max(max, result.latencyMs), 0);
+
+  return {
+    choice,
+    confidence: median(confidences),
+    probabilities,
+    usage,
+    latencyMs,
+    runs: requested,
+    degraded: valid.length < requested,
+    spread: Math.max(...soportados) - Math.min(...soportados),
+    perRun: valid.map((result) => ({
+      choice: result.choice,
+      soportado: toNumber(result.probabilities.soportado),
+      confidence: toNumber(result.confidence),
+    })),
   };
 }
