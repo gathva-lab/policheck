@@ -49,10 +49,16 @@ function isCatalogCall(call: unknown[]): boolean {
   return String(call[0]) === 'https://integrate.api.nvidia.com/v1/models';
 }
 
-function request(): Request {
+function request(key = 'sweep-key'): Request {
   return new Request('http://localhost/api/maintenance/models-check', {
     method: 'POST',
-    headers: { 'x-sweep-key': 'sweep-key' },
+    headers: { 'x-sweep-key': key },
+  });
+}
+
+function requestWithoutKey(): Request {
+  return new Request('http://localhost/api/maintenance/models-check', {
+    method: 'POST',
   });
 }
 
@@ -114,5 +120,55 @@ describe('/api/maintenance/models-check validación NVIDIA', () => {
     expect(results[0].fallback_used).toBe(false);
     expect(results[0].ok).toBe(true);
     expect(results[0].finish_reason).toBe('stop');
+  });
+});
+
+describe('/api/maintenance/models-check autorización', () => {
+  beforeEach(() => {
+    process.env.NEXT_PUBLIC_SUPABASE_URL = 'https://supabase.test';
+    process.env.SUPABASE_SERVICE_ROLE_KEY = 'service-role';
+    process.env.SWEEP_KEY = 'sweep-key';
+    h.setRows([]);
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('sin cabecera devuelve un mensaje accionable y no responde 200', async () => {
+    const { POST } = await import('./route');
+    const response = await POST(requestWithoutKey());
+    const body = (await response.json()) as { error?: string; hint?: string };
+
+    expect(response.status).toBe(401);
+    expect(body.error).toBe('Falta la cabecera x-sweep-key');
+    expect(body.hint).toContain('sin los signos < >');
+  });
+
+  it('acepta la clave válida enviada por SWEEP_KEY', async () => {
+    const { POST } = await import('./route');
+    const response = await POST(request('sweep-key'));
+
+    expect(response.status).toBe(200);
+  });
+
+  it('acepta la clave válida enviada por SUPABASE_SERVICE_ROLE_KEY', async () => {
+    delete process.env.SWEEP_KEY;
+    const { POST } = await import('./route');
+    const response = await POST(request('service-role'));
+
+    expect(response.status).toBe(200);
+  });
+
+  it('con clave incorrecta distingue el error de una cabecera ausente', async () => {
+    const { POST } = await import('./route');
+    const response = await POST(request('clave-incorrecta'));
+    const body = (await response.json()) as { error?: string; hint?: string };
+
+    expect(response.status).toBe(401);
+    expect(body.error).toContain('SWEEP_KEY');
+    expect(body.error).toContain('SUPABASE_SERVICE_ROLE_KEY');
+    expect(body.hint).toBeUndefined();
   });
 });
