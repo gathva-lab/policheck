@@ -7,6 +7,7 @@ import {
   type PoliticoParaVincular,
   type SugerenciaVinculo,
 } from '@/lib/parliamentary-matching';
+import { calcularEstadoPadron } from '@/lib/parlamentarios-estado';
 
 export const dynamic = 'force-dynamic';
 
@@ -74,6 +75,20 @@ export default async function ParlamentariosPage({ searchParams }: { searchParam
   const filas = (filasData ?? []) as FilaParlamentario[];
   const politicos = (politicosData ?? []) as PoliticoRow[];
 
+  let totalGuardado: number | null = null;
+  if (!errorPadron && filas.length === 0) {
+    const { count } = await supabase
+      .from('parliamentarians')
+      .select('*', { count: 'exact', head: true });
+    totalGuardado = count ?? 0;
+  }
+
+  const estadoPadron = calcularEstadoPadron(
+    filas.length,
+    Boolean(errorPadron),
+    totalGuardado
+  );
+
   const partidos = Array.from(
     new Set(filas.map((fila) => fila.partido).filter((partido): partido is string => Boolean(partido)))
   ).sort((a, b) => a.localeCompare(b, 'es'));
@@ -118,6 +133,9 @@ export default async function ParlamentariosPage({ searchParams }: { searchParam
           <p className="mt-3 text-muted-foreground">
             Identificadores oficiales del Senado para vincular votaciones con la persona
             correcta. El PARLID es el dato auditable: no se infiere del nombre.
+          </p>
+          <p className="mt-2 text-sm font-medium">
+            {filas.length} {filas.length === 1 ? 'parlamentario leído' : 'parlamentarios leídos'}
           </p>
           <blockquote className="mt-4 rounded-lg border border-amber-300 bg-amber-50 p-4 text-sm leading-relaxed text-amber-900 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-100">
             El padrón viene de los servicios públicos del Senado. El vínculo con un político de
@@ -169,15 +187,13 @@ export default async function ParlamentariosPage({ searchParams }: { searchParam
           </Link>
         </form>
 
-        {errorPadron ? (
+        {estadoPadron.tipo === 'error' ? (
           <div className="mb-6 rounded-lg border border-red-300 bg-red-50 p-4 text-sm text-red-900 dark:border-red-900 dark:bg-red-950/40 dark:text-red-200">
             No se pudo leer el padrón. Verifica que la migración
             <code className="mx-1 font-mono">20261127_parlamentarios.sql</code>
             esté aplicada.
           </div>
-        ) : null}
-
-        {filas.length === 0 ? (
+        ) : estadoPadron.tipo === 'vacio' ? (
           <section className="rounded-xl border border-border bg-card p-6 text-card-foreground">
             <h2 className="text-lg font-semibold">El padrón está vacío</h2>
             <p className="mt-2 text-sm leading-relaxed text-muted-foreground">
@@ -188,6 +204,15 @@ export default async function ParlamentariosPage({ searchParams }: { searchParam
               {`curl -X POST https://tu-dominio/api/maintenance/parlamentarios \\
   -H "x-sweep-key: <clave>"`}
             </pre>
+          </section>
+        ) : estadoPadron.tipo === 'bloqueado' ? (
+          <section className="rounded-xl border border-amber-300 bg-amber-50 p-6 text-amber-900 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-100">
+            <h2 className="text-lg font-semibold">La lectura pública está bloqueada</h2>
+            <p className="mt-2 text-sm leading-relaxed">
+              Hay {estadoPadron.totalGuardado} parlamentarios guardados pero la lectura
+              pública los bloquea. Falta aplicar la migración con la política de lectura{' '}
+              <code className="font-mono">20261127_parlamentarios_rls.sql</code>.
+            </p>
           </section>
         ) : filtradas.length === 0 ? (
           <section className="rounded-xl border border-border bg-card p-6 text-card-foreground">
