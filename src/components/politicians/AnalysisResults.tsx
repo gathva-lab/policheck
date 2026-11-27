@@ -10,9 +10,12 @@ import { Button } from '@/components/ui/button';
 import { AlertTriangle, ShieldCheck, Activity, BrainCircuit, RefreshCw } from 'lucide-react';
 import { displayLabel, colorFromLabel, type VeracityColor } from '@/lib/veracity';
 import {
+    EXTERNAL_RELATIONS,
     FALLACY_TYPES,
     type ContentNature,
+    type ExternalRelation,
     type FallacyType,
+    type ReportExternalEvidence,
     type ReportFallacy,
     type ReportQuote,
 } from '@/lib/consensus';
@@ -127,6 +130,7 @@ interface PlainContent {
     quotes: ReportQuote[] | null;
     fallacies: ReportFallacy[] | null;
     contentNature: ContentNature | null;
+    externalEvidence: ReportExternalEvidence[] | null;
 }
 
 const EMPTY_PLAIN_CONTENT: PlainContent = {
@@ -135,6 +139,25 @@ const EMPTY_PLAIN_CONTENT: PlainContent = {
     quotes: null,
     fallacies: null,
     contentNature: null,
+    externalEvidence: null,
+};
+
+const EXTERNAL_RELATION_BADGES: Record<ExternalRelation, { emoji: string; label: string; className: string }> = {
+    coincide: {
+        emoji: '✅',
+        label: 'Coincide',
+        className: 'bg-emerald-100 text-emerald-800 dark:bg-emerald-900/40 dark:text-emerald-300',
+    },
+    difiere: {
+        emoji: '⚠️',
+        label: 'Difiere',
+        className: 'bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-300',
+    },
+    no_comparable: {
+        emoji: '◻️',
+        label: 'No comparable',
+        className: 'bg-slate-200 text-slate-700 dark:bg-slate-800 dark:text-slate-300',
+    },
 };
 
 const FALLACY_LABELS: Record<FallacyType, string> = {
@@ -185,6 +208,29 @@ function asFallacies(value: unknown): ReportFallacy[] | null {
     return fallacies.length > 0 ? fallacies : null;
 }
 
+function asExternalEvidence(value: unknown): ReportExternalEvidence[] | null {
+    if (!Array.isArray(value)) return null;
+    const evidence: ReportExternalEvidence[] = [];
+    for (const item of value) {
+        if (!item || typeof item !== 'object') continue;
+        const obj = item as Record<string, unknown>;
+        const claim = asPlainString(obj.claim);
+        const officialValue = asPlainString(obj.official_value);
+        const detail = asPlainString(obj.detail);
+        const relation = asPlainString(obj.relation)?.toLowerCase();
+        if (!claim || !officialValue || !detail) continue;
+        if (!relation || !EXTERNAL_RELATIONS.includes(relation as ExternalRelation)) continue;
+        evidence.push({
+            claim,
+            officialValue,
+            source: asPlainString(obj.source) ?? 'Banco Central de Chile',
+            relation: relation as ExternalRelation,
+            detail,
+        });
+    }
+    return evidence.length > 0 ? evidence : null;
+}
+
 function readPlainContent(report: AIReport): PlainContent {
     const raw = report.report_json;
     if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return EMPTY_PLAIN_CONTENT;
@@ -195,6 +241,7 @@ function readPlainContent(report: AIReport): PlainContent {
         quotes: asQuotes(obj.quotes),
         fallacies: asFallacies(obj.fallacies),
         contentNature: asContentNature(obj.content_nature),
+        externalEvidence: asExternalEvidence(obj.external_evidence),
     };
 }
 
@@ -629,6 +676,48 @@ export function AnalysisResults({ sourceId, politicianId, sourceUrl }: AnalysisR
                             </ul>
                         </div>
                     )}
+                </section>
+            )}
+
+            {/* Contraste con datos oficiales: solo si el modelo lo reportó */}
+            {plainContent.externalEvidence && plainContent.externalEvidence.length > 0 && (
+                <section className="space-y-4 border-b border-slate-200 dark:border-slate-800 pb-6">
+                    <h5 className="font-bold text-xs uppercase tracking-wider text-muted-foreground">
+                        Contraste con datos oficiales
+                    </h5>
+                    <ul className="space-y-3">
+                        {plainContent.externalEvidence.map((evidence, index) => {
+                            const badge = EXTERNAL_RELATION_BADGES[evidence.relation];
+                            return (
+                                <li key={index} className="rounded-xl border bg-slate-50 dark:bg-slate-900/50 p-4">
+                                    <span className={`inline-block rounded-full px-3 py-1 text-xs font-bold ${badge.className}`}>
+                                        {badge.emoji} {badge.label}
+                                    </span>
+                                    <p className="mt-3 italic text-slate-800 dark:text-slate-200 leading-relaxed">
+                                        “{evidence.claim}”
+                                    </p>
+                                    <p className="mt-2 text-sm text-slate-700 dark:text-slate-300 leading-relaxed">
+                                        <span className="font-semibold">Dato oficial: </span>
+                                        {evidence.officialValue}
+                                    </p>
+                                    <p className="mt-1 text-sm text-slate-600 dark:text-slate-400 leading-relaxed">
+                                        {evidence.detail}
+                                    </p>
+                                    <a
+                                        href="https://si3.bcentral.cl/siete/"
+                                        target="_blank"
+                                        rel="noopener noreferrer"
+                                        className="mt-2 inline-block text-xs font-semibold text-primary underline underline-offset-2"
+                                    >
+                                        {evidence.source} · si3.bcentral.cl
+                                    </a>
+                                </li>
+                            );
+                        })}
+                    </ul>
+                    <p className="text-xs text-slate-500 dark:text-slate-400">
+                        Dato oficial consultado al Banco Central. El porcentaje de veracidad mide otra cosa.
+                    </p>
                 </section>
             )}
 

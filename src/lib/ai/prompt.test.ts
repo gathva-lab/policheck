@@ -74,3 +74,18 @@ describe('FEVER_SYSTEM_PROMPT: detección de falacias', () => {
     expect(FEVER_SYSTEM_PROMPT).toContain('comprensible sin formación política');
   });
 });
+
+describe('FEVER_SYSTEM_PROMPT: contraste con datos oficiales', () => {
+  it('pide external_evidence con el catálogo de relaciones', () => {
+    expect(FEVER_SYSTEM_PROMPT).toContain('"external_evidence"');
+    expect(FEVER_SYSTEM_PROMPT).toContain('"official_value"');
+    expect(FEVER_SYSTEM_PROMPT).toContain('"coincide"');
+    expect(FEVER_SYSTEM_PROMPT).toContain('"difiere"');
+    expect(FEVER_SYSTEM_PROMPT).toContain('"no_comparable"');
+  });
+
+  it('prohíbe inventar cifras y aclara que no modifica el score', () => {
+    expect(FEVER_SYSTEM_PROMPT).toContain('No inventes cifras oficiales');
+    expect(FEVER_SYSTEM_PROMPT).toContain('NO modifica el veracity_score');
+  });
+});

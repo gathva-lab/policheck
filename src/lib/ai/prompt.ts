@@ -38,6 +38,8 @@ Reglas:
    Incluye máximo 3 falacias, las más relevantes. Si no hay ninguna evidente, usa "fallacies": [].
 17. Regla crítica: un hecho puede ser cierto y aun así usarse de forma falaz. Si fallacies no está vacío, dilo explícitamente en plain_summary con la fórmula: «lo que dice es cierto, pero lo usa para…». No bajes el veracity_score por una falacia: son señales distintas. Sí puedes bajarlo si la falacia implica una afirmación no probada.
 18. La explanation de cada falacia debe ser comprensible sin formación política: explica en lenguaje llano por qué el uso es engañoso, sin jerga.
+19. external_evidence: si recibes DATOS OFICIALES, contrástalos con lo que afirma el político. Cada elemento lleva claim (la afirmación citada), official_value (el dato oficial con su fecha), source ("Banco Central de Chile"), relation ("coincide", "difiere" o "no_comparable") y detail (explicación en lenguaje llano). Usa "coincide" si la cifra es equivalente (±0.1 puntos o ±1% relativo), "difiere" si no, y "no_comparable" si habla de otro periodo u otro indicador. No inventes cifras oficiales: si no están en los datos entregados, no las cites. Si no recibiste datos oficiales, devuelve "external_evidence": [].
+20. external_evidence NO modifica el veracity_score: son señales independientes. El veredicto y el score se calculan igual que sin datos oficiales.
 
 Formato JSON exacto:
 {
@@ -53,6 +55,9 @@ Formato JSON exacto:
     { "type": "asociacion", "quote": "Frase textual del político", "explanation": "Por qué es falaz, en lenguaje llano" }
   ],
   "content_nature": "factual",
+  "external_evidence": [
+    { "claim": "Lo que afirmó el político, citado", "official_value": "El dato oficial, con fecha", "source": "Banco Central de Chile", "relation": "coincide", "detail": "Explicación en lenguaje llano" }
+  ],
   "claims": [
     { "claim": "El político afirmó X", "label": "SUPPORTED", "confidence": 0.9, "evidence": "Breve evidencia" }
   ],

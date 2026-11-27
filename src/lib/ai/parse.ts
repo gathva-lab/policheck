@@ -1,9 +1,12 @@
 import { clampScore, isVerdictLabel, type VerdictLabel } from '../veracity';
 import {
+  EXTERNAL_RELATIONS,
   FALLACY_TYPES,
   type ContentNature,
+  type ExternalRelation,
   type FallacyType,
   type ModelReport,
+  type ReportExternalEvidence,
   type ReportFallacy,
   type ReportQuote,
 } from '../consensus';
@@ -93,6 +96,32 @@ function toFallacies(value: unknown): ReportFallacy[] | null {
   return fallacies.length > 0 ? fallacies : null;
 }
 
+function toExternalEvidence(value: unknown): ReportExternalEvidence[] | null {
+  if (!Array.isArray(value)) return null;
+
+  const evidence: ReportExternalEvidence[] = [];
+  for (const item of value) {
+    if (!item || typeof item !== 'object') continue;
+    const obj = item as Record<string, unknown>;
+    const claim = toString(obj.claim);
+    const officialValue = toString(obj.official_value);
+    const detail = toString(obj.detail);
+    const relation = toString(obj.relation)?.toLowerCase();
+    if (!claim || !officialValue || !detail) continue;
+    if (!relation || !EXTERNAL_RELATIONS.includes(relation as ExternalRelation)) continue;
+    evidence.push({
+      claim,
+      officialValue,
+      source: toString(obj.source) ?? 'Banco Central de Chile',
+      relation: relation as ExternalRelation,
+      detail,
+    });
+    if (evidence.length === 3) break;
+  }
+
+  return evidence.length > 0 ? evidence : null;
+}
+
 export function parseModelOutput(modelName: string, content: string): ParsedAnalysis {
   const raw = extractJsonObject(content);
   if (!raw || typeof raw !== 'object') return { report: null, raw };
@@ -112,6 +141,7 @@ export function parseModelOutput(modelName: string, content: string): ParsedAnal
       quotes: toQuotes(obj.quotes),
       fallacies: toFallacies(obj.fallacies),
       contentNature: toContentNature(obj.content_nature),
+      externalEvidence: toExternalEvidence(obj.external_evidence),
     },
     raw,
   };
