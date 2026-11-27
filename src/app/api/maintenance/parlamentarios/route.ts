@@ -50,7 +50,7 @@ function supabaseAdmin() {
   );
 }
 
-export function filaDesdeSenador(senador: ParlamentarioSenado): FilaParlamentario {
+function filaDesdeSenador(senador: ParlamentarioSenado): FilaParlamentario {
   const nombre = nombreCompleto(senador);
   return {
     parl_id: senador.parlId,
