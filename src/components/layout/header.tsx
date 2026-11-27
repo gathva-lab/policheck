@@ -47,6 +47,9 @@ export async function Header() {
           <Link href="/historial" className="hover:text-foreground transition-colors">
             Historial
           </Link>
+          <Link href="/parlamentarios" className="hover:text-foreground transition-colors">
+            Parlamentarios
+          </Link>
         </nav>
 
         {/* Acciones */}
