@@ -25,6 +25,11 @@ export interface LlmCallResult {
   finishReason: string | null;
 }
 
+// El check usa una entrada mínima (dos palabras). La latencia no representa el
+// análisis real de una transcripción larga, por eso el nombre lo explicita.
+export const MODEL_CHECK_LATENCY_NOTE =
+  'latencia con una entrada mínima; el análisis real con transcripciones largas tarda más';
+
 export interface ModelCheckResult {
   model_id: string;
   // `provider` se conserva por compatibilidad y siempre refleja el usado.
@@ -35,7 +40,9 @@ export interface ModelCheckResult {
   routed_model_id: string;
   ok: boolean;
   http_status: number | null;
-  latency_ms: number;
+  // Latencia medida con una entrada mínima, no con una transcripción real.
+  latency_ms_min: number;
+  nota: string;
   content_chars: number;
   error_reason: CallFailureReason | null;
   finish_reason: string | null;
@@ -266,7 +273,8 @@ export async function checkModel(
     routed_model_id: routedModelId,
     ok: outcome.failureReason === null,
     http_status: outcome.httpStatus,
-    latency_ms: outcome.latencyMs,
+    latency_ms_min: outcome.latencyMs,
+    nota: MODEL_CHECK_LATENCY_NOTE,
     content_chars: outcome.content.length,
     error_reason: outcome.failureReason,
     finish_reason: outcome.finishReason,

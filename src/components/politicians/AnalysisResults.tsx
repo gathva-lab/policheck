@@ -7,6 +7,7 @@ import { Progress } from '@/components/ui/progress';
 import { Alert, AlertTitle, AlertDescription } from '@/components/ui/alert';
 import { Accordion, AccordionItem, AccordionTrigger, AccordionContent } from '@/components/ui/accordion';
 import { Button } from '@/components/ui/button';
+import { ConsensusVerdictScore } from '@/components/politicians/ConsensusVerdictScore';
 import { AlertTriangle, ShieldCheck, Activity, BrainCircuit, RefreshCw } from 'lucide-react';
 import { displayLabel, colorFromLabel, type VeracityColor } from '@/lib/veracity';
 import {
@@ -345,7 +346,7 @@ export function AnalysisResults({ sourceId, politicianId, sourceUrl }: AnalysisR
     const fetchReports = useCallback(async () => {
         const supabase = createClient();
         const [reportsRes, sourceRes] = await Promise.all([
-            supabase.from('ai_reports').select('*').eq('source_id', sourceId),
+            supabase.from('ai_reports').select('*').eq('source_id', sourceId).is('superseded_at', null),
             supabase.from('sources').select('verdict, verdict_score, mean_score, nature_override, consensus_agreement, jev_support, requires_review, status, analysis_error').eq('id', sourceId).maybeSingle(),
         ]);
 
@@ -663,11 +664,15 @@ export function AnalysisResults({ sourceId, politicianId, sourceUrl }: AnalysisR
     const consensusReports = validReports.filter((report) => !getConsensusDiscard(report).discarded);
     const scoredReports = consensusReports.length > 0 ? consensusReports : validReports;
 
-    // El verdict_score persistido ya es la mediana. Si aún no está disponible,
-    // se calcula en cliente sobre todos los puntajes para no mostrar el promedio.
+    const hasVerdict = Boolean(verdict?.verdict);
+    // El verdict_score persistido ya es la mediana de los reportes usados. Si
+    // aún no está disponible se recalcula sobre los no descartados; nunca sobre
+    // los descartados, que solo sirven para diagnosticar outliers.
     const allScores = validReports.map((report) => report.veracity_score as number);
-    const computedMedian = allScores.length > 0 ? median(allScores) : null;
-    const verdictScoreValue = verdict?.verdict_score ?? computedMedian;
+    const usedScores = scoredReports.map((report) => report.veracity_score as number);
+    const candidateMedian = allScores.length > 0 ? median(allScores) : null;
+    const usedMedian = usedScores.length > 0 ? median(usedScores) : null;
+    const verdictScoreValue = verdict?.verdict_score ?? usedMedian;
     const avgVeracity = Math.round(verdictScoreValue ?? 0);
     const meanScoreValue =
         verdict?.mean_score ??
@@ -678,13 +683,14 @@ export function AnalysisResults({ sourceId, politicianId, sourceUrl }: AnalysisR
         scoredReports.reduce((acc, r) => acc + (r.coherence_score || 0), 0) / scoredReports.length
     );
 
-    // Un modelo es outlier si se aleja más de 25 puntos de la mediana. Se
-    // incluyen los descartados para que el disidente no quede invisible.
+    // Un modelo es outlier si se aleja más de 25 puntos de la mediana de todos
+    // los candidatos: el disidente descartado sigue siendo una señal de que los
+    // modelos no coinciden, aunque no contamine la veracidad mostrada.
     let outlierReport: AIReport | null = null;
     let maxOutlierDistance = 0;
-    if (computedMedian !== null) {
+    if (candidateMedian !== null) {
         for (const report of validReports) {
-            const distance = Math.abs((report.veracity_score as number) - computedMedian);
+            const distance = Math.abs((report.veracity_score as number) - candidateMedian);
             if (distance > maxOutlierDistance) {
                 maxOutlierDistance = distance;
                 outlierReport = report;
@@ -692,9 +698,9 @@ export function AnalysisResults({ sourceId, politicianId, sourceUrl }: AnalysisR
         }
     }
     const outlierDetected =
-        computedMedian !== null &&
+        candidateMedian !== null &&
         (maxOutlierDistance > 25 ||
-            (meanScoreValue !== null && Math.abs(computedMedian - meanScoreValue) > 25));
+            (meanScoreValue !== null && Math.abs(candidateMedian - meanScoreValue) > 25));
 
     // Obtener un resumen y puntos clave (tomamos el primero válido, idealmente los modelos más potentes suelen venir primero o ultimo)
     const mainSummaryReport = scoredReports.find(r => r.summary);
@@ -800,9 +806,15 @@ export function AnalysisResults({ sourceId, politicianId, sourceUrl }: AnalysisR
                         )}
                         <div className="flex items-center gap-3 flex-wrap shrink-0">
                             {renderVerdictBadge()}
-                            <span className={`text-xl font-bold ${getScoreTextClass(avgVeracity)}`}>
-                                {avgVeracity}%
-                            </span>
+                            {hasVerdict ? (
+                                <span className={`text-xl font-bold ${getScoreTextClass(avgVeracity)}`}>
+                                    {avgVeracity}%
+                                </span>
+                            ) : (
+                                <span className="text-sm font-semibold text-slate-600 dark:text-slate-400">
+                                    Sin consenso
+                                </span>
+                            )}
                         </div>
                     </div>
 
@@ -924,14 +936,19 @@ export function AnalysisResults({ sourceId, politicianId, sourceUrl }: AnalysisR
                 </h4>
 
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-6 md:gap-8">
-                    {/* Veracidad */}
-                    <div className="space-y-3">
-                        <div className="flex justify-between items-end">
-                            <span className="text-xs font-bold text-muted-foreground uppercase tracking-widest">Veracidad</span>
-                            <span className={`text-3xl font-black leading-none ${getScoreTextClass(avgVeracity)}`}>{avgVeracity}%</span>
-                        </div>
-                        <Progress value={avgVeracity} className={`h-3 bg-slate-100 dark:bg-slate-800`} indicatorClassName={getScoreColor(avgVeracity)} />
-                    </div>
+                    {/* Veracidad: sin veredicto no se muestra porcentaje ni barra */}
+                    <ConsensusVerdictScore
+                        verdict={verdict?.verdict ?? null}
+                        verdictScore={verdictScoreValue}
+                        agreement={verdict?.consensus_agreement ?? null}
+                        outlierModel={outlierDetected ? outlierReport?.model_name ?? null : null}
+                        outlierScore={
+                            outlierDetected && outlierReport
+                                ? (outlierReport.veracity_score as number)
+                                : null
+                        }
+                        candidateMedian={candidateMedian}
+                    />
 
                     {/* Coherencia */}
                     <div className="space-y-3">
@@ -1040,13 +1057,13 @@ export function AnalysisResults({ sourceId, politicianId, sourceUrl }: AnalysisR
 
             {/* Detalles por Modelo */}
             <div className="pt-2">
-                {outlierDetected && outlierReport && computedMedian !== null && (
+                {outlierDetected && outlierReport && candidateMedian !== null && (
                     <p className="mb-3 flex items-start gap-2 text-sm text-amber-700 dark:text-amber-300">
                         <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5" />
                         <span>
                             Un modelo difirió del resto: <strong>{outlierReport.model_name}</strong>{' '}
-                            puntuó {(outlierReport.veracity_score as number)} frente a una mediana de{' '}
-                            {computedMedian}.
+                            puntuó {(outlierReport.veracity_score as number)} frente a una mediana de candidatos de{' '}
+                            {candidateMedian}.
                         </span>
                     </p>
                 )}

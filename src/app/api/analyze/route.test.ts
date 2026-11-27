@@ -6,6 +6,7 @@ const h = vi.hoisted(() => {
 
   const updates: Array<{ table: string; values: Record<string, unknown> }> = [];
   const inserts: Array<{ table: string; values: Record<string, unknown> }> = [];
+  const deletes: Array<{ table: string }> = [];
 
   interface TestModelConfig {
     id: string;
@@ -46,11 +47,12 @@ const h = vi.hoisted(() => {
   function chain(table: string): Chain {
     const methods: string[] = [];
     const target: Chain = {};
-    for (const name of ['select', 'eq', 'gte', 'lt', 'in', 'insert', 'update', 'delete', 'order', 'limit']) {
+    for (const name of ['select', 'eq', 'gte', 'lt', 'in', 'is', 'insert', 'update', 'delete', 'order', 'limit']) {
       target[name] = (...args: unknown[]) => {
         methods.push(name);
         if (name === 'update') updates.push({ table, values: args[0] as Record<string, unknown> });
         if (name === 'insert') inserts.push({ table, values: args[0] as Record<string, unknown> });
+        if (name === 'delete') deletes.push({ table });
         return target;
       };
     }
@@ -73,6 +75,7 @@ const h = vi.hoisted(() => {
   return {
     updates,
     inserts,
+    deletes,
     chain,
     setModelConfigs: (rows: TestModelConfig[]) => {
       modelConfigs = rows;
@@ -139,6 +142,7 @@ beforeEach(() => {
   h.resetExistingSource();
   h.inserts.length = 0;
   h.updates.length = 0;
+  h.deletes.length = 0;
   h.jevConsensus.mockReset();
   h.jevConsensus.mockResolvedValue(null);
 });
@@ -845,6 +849,61 @@ describe('/api/analyze cortacircuitos de timeout', () => {
       .map((insert) => insert.values)
       .filter((values) => values.error_reason === 'timeout');
     expect(timeoutRows).toHaveLength(1);
+  });
+});
+
+describe('/api/analyze historial de reportes', () => {
+  it('en re-análisis marca los ai_reports previos con superseded_at y no los borra', async () => {
+    process.env.OPENROUTER_API_KEY = 'test-key';
+    process.env.SUPABASE_SERVICE_ROLE_KEY = 'test-service-role';
+    process.env.NEXT_PUBLIC_SUPABASE_URL = 'https://supabase.test';
+
+    h.inserts.length = 0;
+    h.updates.length = 0;
+    h.deletes.length = 0;
+    h.callModel.mockReset();
+    h.isVerifiable.mockReset();
+    h.jevConsensus.mockReset();
+    h.extractYoutube.mockReset();
+    h.isVerifiable.mockResolvedValue(null);
+    h.jevConsensus.mockResolvedValue(null);
+    h.callModel.mockImplementation(async (modelId: string) => ({
+      model: modelId,
+      content:
+        '{"verdict_label":"discutible","veracity_score":65,"coherence_score":70,"summary":"ok"}',
+      inputTokens: 20,
+      outputTokens: 10,
+      latencyMs: 5,
+    }));
+    h.setExistingSource({
+      id: 'source-1',
+      url: 'https://www.youtube.com/watch?v=abc',
+      title: 'Video',
+      status: 'verificada',
+      transcript_text: 'texto cacheado del primer análisis '.repeat(12),
+      transcript_method: 'caption-tracks',
+      transcript_words: 72,
+    });
+
+    const { POST } = await import('@/app/api/analyze/route');
+    const request = new Request('http://localhost/api/analyze', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        url: 'https://www.youtube.com/watch?v=abc',
+        politicianId: 'politico-1',
+        force: true,
+      }),
+    });
+
+    const response = await POST(request);
+    expect(response.status).toBe(200);
+
+    const supersededUpdate = h.updates.find(
+      (update) => update.table === 'ai_reports' && 'superseded_at' in update.values
+    );
+    expect(typeof supersededUpdate?.values.superseded_at).toBe('string');
+    expect(h.deletes.filter((row) => row.table === 'ai_reports')).toHaveLength(0);
   });
 });
 

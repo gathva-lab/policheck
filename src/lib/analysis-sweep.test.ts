@@ -37,7 +37,15 @@ function makeAdmin(candidateIds: string[], reportedIds: string[]) {
           select: () => ({
             in: (_column: string, ids: string[]) => {
               expect(ids).toEqual(candidateIds);
-              return Promise.resolve({ data: reportedIds.map((id) => ({ source_id: id })), error: null });
+              return {
+                is: (_column2: string, value: null) => {
+                  expect(value).toBeNull();
+                  return Promise.resolve({
+                    data: reportedIds.map((id) => ({ source_id: id })),
+                    error: null,
+                  });
+                },
+              };
             },
           }),
         };

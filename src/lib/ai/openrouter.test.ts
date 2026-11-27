@@ -17,6 +17,21 @@ describe('modelTimeoutFor', () => {
 });
 
 describe('callModel', () => {
+  it('envía temperature 0 para que el clasificador sea reproducible', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      jsonResponse({
+        choices: [{ finish_reason: 'stop', message: { content: 'ok' } }],
+        usage: { prompt_tokens: 10, completion_tokens: 1 },
+      })
+    );
+    vi.stubGlobal('fetch', fetchMock);
+
+    await callModel('deepseek/deepseek-v4.1-flash', 'key', 'sistema', 'usuario');
+
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body as string) as Record<string, unknown>;
+    expect(body.temperature).toBe(0);
+  });
+
   beforeEach(() => {
     vi.spyOn(console, 'warn').mockImplementation(() => {});
   });

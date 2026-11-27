@@ -78,7 +78,7 @@ describe('callModel enrutamiento por proveedor', () => {
     const body = fetchBody(call);
     expect(body.model).toBe('nvidia/nemotron-3-ultra-550b-a55b');
     expect(body.reasoning).toEqual({ enabled: false });
-    expect(body.temperature).toBe(0.2);
+    expect(body.temperature).toBe(0);
     expect(result?.provider).toBe('nvidia');
     expect(result?.model).toBe('nvidia/nemotron-3-ultra-550b-a55b:free');
   });
