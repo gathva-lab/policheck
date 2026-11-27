@@ -8,6 +8,7 @@ import {
   isYoutubeUrl,
   MIN_CONTENT_CHARS,
   NoTranscriptError,
+  truncateToTokens,
   type ExtractedContent,
 } from '@/lib/ai/extract';
 import { FEVER_SYSTEM_PROMPT } from '@/lib/ai/prompt';
@@ -53,6 +54,11 @@ const bcchSeriesCache = new Map<string, BcchSeries | null>();
 
 function isoDay(date: Date): string {
   return date.toISOString().slice(0, 10);
+}
+
+function countWords(text: string): number {
+  const trimmed = text.trim();
+  return trimmed ? trimmed.split(/\s+/).length : 0;
 }
 
 function daysAgoIso(days: number): string {
@@ -313,7 +319,7 @@ export async function POST(request: Request) {
   const startedAt = Date.now();
 
   try {
-    let body: { url?: string; politicianId?: string; force?: boolean };
+    let body: { url?: string; politicianId?: string; force?: boolean; refetchTranscript?: boolean };
     try {
       body = await request.json();
     } catch {
@@ -323,6 +329,9 @@ export async function POST(request: Request) {
     url = body?.url;
     const politicianId = body?.politicianId;
     const force = body?.force === true;
+    // `force` invalida los reportes, no la transcripción. Solo este parámetro
+    // explícito obliga a volver a pedir el texto a YouTube.
+    const refetchTranscript = body?.refetchTranscript === true;
 
   if (!url || typeof url !== 'string') {
     return NextResponse.json({ error: 'URL es requerida' }, { status: 400 });
@@ -483,9 +492,68 @@ export async function POST(request: Request) {
 
   etapa = 'extraccion';
   // 1. Extracción de contenido (artículo o YouTube)
+  const isVideo = isYoutubeUrl(normalizedUrl);
+  const cachedTranscript =
+    isVideo &&
+    !refetchTranscript &&
+    typeof existing?.transcript_text === 'string' &&
+    existing.transcript_text.trim().length >= MIN_CONTENT_CHARS
+      ? existing.transcript_text
+      : null;
+
   let content: ExtractedContent;
+  let transcriptSource: 'cache' | 'fresh' | 'none' = 'none';
   try {
-    content = isYoutubeUrl(normalizedUrl) ? await extractYoutube(normalizedUrl) : await extractArticle(normalizedUrl);
+    if (cachedTranscript) {
+      // Reutilizar el texto ya extraído evita una petición a YouTube y el riesgo
+      // de que la IP compartida del Worker esté limitada.
+      const cachedWords =
+        typeof existing?.transcript_words === 'number' && existing.transcript_words > 0
+          ? existing.transcript_words
+          : countWords(cachedTranscript);
+      content = {
+        title:
+          typeof existing?.title === 'string' && existing.title.trim()
+            ? existing.title
+            : 'Video de YouTube',
+        text: truncateToTokens(cachedTranscript),
+        sourceType: 'video_youtube',
+        transcriptUsed: true,
+        transcriptWords: cachedWords,
+        transcriptMethod:
+          typeof existing?.transcript_method === 'string'
+            ? (existing.transcript_method as ExtractedContent['transcriptMethod'])
+            : null,
+        transcriptText: cachedTranscript,
+      };
+      transcriptSource = 'cache';
+      console.log('[analyze] transcripción reutilizada desde caché', {
+        source_id: activeSourceId,
+        words: cachedWords,
+      });
+    } else {
+      content = isVideo ? await extractYoutube(normalizedUrl) : await extractArticle(normalizedUrl);
+      if (isVideo && content.transcriptUsed) {
+        transcriptSource = 'fresh';
+        if (content.transcriptText && content.transcriptMethod) {
+          const { error: transcriptError } = await admin
+            .from('sources')
+            .update({
+              transcript_text: content.transcriptText,
+              transcript_method: content.transcriptMethod,
+              transcript_words: content.transcriptWords,
+              transcript_fetched_at: new Date().toISOString(),
+            })
+            .eq('id', activeSourceId);
+          if (transcriptError) {
+            console.error('[analyze] Error guardando la transcripción:', {
+              source_id: activeSourceId,
+              error: transcriptError,
+            });
+          }
+        }
+      }
+    }
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Error de extracción';
     console.error('[analyze] Error de extracción:', error);
@@ -502,10 +570,10 @@ export async function POST(request: Request) {
     if (error instanceof NoTranscriptError) {
       return NextResponse.json(
         {
-          error:
-            'No se pudo obtener la transcripción de este video. YouTube puede estar limitando las peticiones desde nuestro servidor; intenta re-analizar en unos minutos.',
+          error: error.message,
           source_id: activeSourceId,
           reason: 'sin_transcripcion',
+          retryable: error.retryable !== false,
         },
         { status: 422 }
       );
@@ -850,6 +918,7 @@ export async function POST(request: Request) {
               transcript_used: content.transcriptUsed,
               transcript_words: content.transcriptWords,
               transcript_method: content.transcriptMethod ?? null,
+              transcript_source: transcriptSource === 'none' ? null : transcriptSource,
             },
             _analysis: attemptDiagnostics,
           }
