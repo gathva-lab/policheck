@@ -80,7 +80,7 @@ vi.mock('@/lib/ai/extract', () => ({
   MIN_CONTENT_CHARS: 200,
 }));
 
-vi.mock('@/lib/ai/openrouter', () => ({
+vi.mock('@/lib/ai/llm', () => ({
   callModel: h.callModel,
   modelTimeoutFor: () => 45000,
 }));

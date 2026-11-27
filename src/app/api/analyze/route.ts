@@ -15,8 +15,9 @@ import {
   callModel,
   modelTimeoutFor,
   type CallFailureReason,
-  type OpenRouterResult,
-} from '@/lib/ai/openrouter';
+  type LlmCallResult,
+  type LlmProvider,
+} from '@/lib/ai/llm';
 import { parseModelOutput, type ParsedAnalysis } from '@/lib/ai/parse';
 import { computeConsensus, type ModelReport } from '@/lib/consensus';
 import { buildAttempts, pickTriplet, type AttemptCandidate } from '@/lib/ai/model-selection';
@@ -148,7 +149,7 @@ interface ModelConfigRow {
   context_window: number | null;
 }
 
-interface SuccessfulCall extends OpenRouterResult {
+interface SuccessfulCall extends LlmCallResult {
   tier: string;
   parsed: ParsedAnalysis;
 }
@@ -159,6 +160,7 @@ interface AttemptFailure {
   reason: CallFailureReason;
   // Latencia real transcurrida hasta el fallo (incluye timeouts).
   latencyMs: number;
+  provider: LlmProvider;
 }
 
 interface AttemptOutcome {
@@ -204,6 +206,7 @@ async function logJevCost(
     cost_usd: jevCostUsd(usage.inputTokens),
     latency_ms: latencyMs,
     tier: 'eco',
+    provider: 'openrouter',
   });
   if (error) {
     console.error('[analyze] Error insertando ai_cost_log de JEV:', {
@@ -243,6 +246,54 @@ async function saveJevToReports(
       .eq('id', row.id);
     if (updateError) {
       console.error('[analyze] Error guardando JEV en ai_reports:', {
+        source_id: sourceId,
+        report_id: row.id,
+        error: updateError,
+      });
+    }
+  }
+}
+
+// Trazabilidad del consenso: deja en report_json el motivo por el que un
+// modelo quedó fuera, para que la UI pueda mostrarlo en el detalle técnico.
+async function saveConsensusDiscards(
+  admin: ReturnType<typeof supabaseAdmin>,
+  sourceId: string,
+  discardedReports: ModelReport[],
+  discardReasons: Record<string, string>
+) {
+  if (discardedReports.length === 0) return;
+
+  const { data, error } = await admin
+    .from('ai_reports')
+    .select('id, model_name, report_json')
+    .eq('source_id', sourceId);
+  if (error) {
+    console.error('[analyze] Error leyendo ai_reports para guardar descartes:', {
+      source_id: sourceId,
+      error,
+    });
+    return;
+  }
+
+  const discardedByName = new Set(discardedReports.map((report) => report.modelName));
+  const rows = (data ?? []) as Array<{ id: string; model_name: string; report_json: unknown }>;
+
+  for (const row of rows) {
+    if (!discardedByName.has(row.model_name)) continue;
+    const reason = discardReasons[row.model_name];
+    if (!reason) continue;
+    const reportJson =
+      row.report_json && typeof row.report_json === 'object' && !Array.isArray(row.report_json)
+        ? { ...(row.report_json as Record<string, unknown>) }
+        : {};
+    reportJson._consensus = { discarded: true, reason };
+    const { error: updateError } = await admin
+      .from('ai_reports')
+      .update({ report_json: reportJson })
+      .eq('id', row.id);
+    if (updateError) {
+      console.error('[analyze] Error guardando descarte de consenso:', {
         source_id: sourceId,
         report_id: row.id,
         error: updateError,
@@ -550,6 +601,7 @@ export async function POST(request: Request) {
       cost_usd: 0,
       latency_ms: 0,
       tier: 'external',
+      provider: 'external',
     });
     if (externalCostError) {
       console.error('[analyze] Error insertando ai_cost_log del Banco Central:', {
@@ -614,14 +666,16 @@ export async function POST(request: Request) {
       for (const candidate of candidates) {
         let candidateFailure: CallFailureReason | null = null;
         let candidateLatencyMs = 0;
+        let candidateProvider: LlmProvider = 'openrouter';
         const result = await callModel(
           candidate.modelId,
           apiKey,
           FEVER_SYSTEM_PROMPT,
           userContent,
-          (reason, latencyMs) => {
+          (reason, latencyMs, provider) => {
             candidateFailure = reason;
             candidateLatencyMs = latencyMs;
+            candidateProvider = provider;
           },
           { timeoutMs: modelTimeoutMs }
         );
@@ -639,6 +693,7 @@ export async function POST(request: Request) {
           tier: candidate.tier,
           reason,
           latencyMs: candidateLatencyMs,
+          provider: candidateProvider,
         });
         // Cortacircuitos: solo se intenta el fallback en fallos transitorios.
         if (!FALLBACK_REASONS.has(reason)) break;
@@ -657,7 +712,9 @@ export async function POST(request: Request) {
     return {
       call: null,
       failureReason: 'http_error',
-      failures: primary ? [{ ...primary, reason: 'http_error', latencyMs: 0 }] : [],
+      failures: primary
+        ? [{ ...primary, reason: 'http_error', latencyMs: 0, provider: 'openrouter' }]
+        : [],
     };
   });
 
@@ -690,13 +747,19 @@ export async function POST(request: Request) {
         tier: outcome.call.tier,
         reason: outcome.failureReason ?? 'parse_failed',
         latencyMs: outcome.call.latencyMs,
+        provider: outcome.call.provider,
       });
     }
     // Red de seguridad: ningún modelo del triplete puede quedar sin fila.
     if (failures.length === 0) {
       const primary = attempts[index]?.[0];
       if (primary) {
-        failures.push({ ...primary, reason: outcome.failureReason ?? 'http_error', latencyMs: 0 });
+        failures.push({
+          ...primary,
+          reason: outcome.failureReason ?? 'http_error',
+          latencyMs: 0,
+          provider: 'openrouter',
+        });
       }
     }
 
@@ -716,6 +779,7 @@ export async function POST(request: Request) {
         latency_ms: failure.latencyMs,
         tier: failure.tier,
         error_reason: failure.reason,
+        provider: failure.provider,
       });
       if (failedCostError) {
         console.error('[analyze] Error insertando ai_cost_log de modelo fallido:', {
@@ -808,6 +872,7 @@ export async function POST(request: Request) {
       cost_usd: costUsd,
       latency_ms: s.latencyMs,
       tier: s.tier,
+      provider: s.provider,
     });
     if (costError) {
       // El cost log es telemetría: no bloquea el flujo, solo se registra.
@@ -838,6 +903,12 @@ export async function POST(request: Request) {
   await setStage('consenso');
   // 8. Consenso entre modelos
   const consensus = computeConsensus(reports, MIN_VALID_MODELS);
+  await saveConsensusDiscards(
+    admin,
+    sourceId,
+    consensus.discardedReports,
+    consensus.discardReasons
+  );
 
   etapa = 'verificacion_jev';
   await setStage('verificacion_jev');

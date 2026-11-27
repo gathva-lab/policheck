@@ -245,6 +245,25 @@ function readPlainContent(report: AIReport): PlainContent {
     };
 }
 
+interface ConsensusDiscard {
+    discarded: boolean;
+    reason: string | null;
+}
+
+const EMPTY_DISCARD: ConsensusDiscard = { discarded: false, reason: null };
+
+function getConsensusDiscard(report: AIReport): ConsensusDiscard {
+    const raw = report.report_json;
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return EMPTY_DISCARD;
+    const consensus = (raw as { _consensus?: unknown })._consensus;
+    if (!consensus || typeof consensus !== 'object') return EMPTY_DISCARD;
+    const obj = consensus as Record<string, unknown>;
+    return {
+        discarded: obj.discarded === true,
+        reason: typeof obj.reason === 'string' ? obj.reason : null,
+    };
+}
+
 const SCORE_CITATION_PATTERN = /\b\d{2}\b[\s\S]*?(puntaje|veracidad|coherencia|claridad)/i;
 
 export function summaryCitesScores(text: string): boolean {
@@ -548,21 +567,25 @@ export function AnalysisResults({ sourceId, politicianId, sourceUrl }: AnalysisR
         );
     }
 
+    // Promedios del consenso: los reportes descartados no contaminan las cifras.
+    const consensusReports = validReports.filter((report) => !getConsensusDiscard(report).discarded);
+    const scoredReports = consensusReports.length > 0 ? consensusReports : validReports;
+
     // Calcular promedios combinados
     const avgVeracity = Math.round(
-        validReports.reduce((acc, r) => acc + (r.veracity_score || 0), 0) / validReports.length
+        scoredReports.reduce((acc, r) => acc + (r.veracity_score || 0), 0) / scoredReports.length
     );
     const avgCoherence = Math.round(
-        validReports.reduce((acc, r) => acc + (r.coherence_score || 0), 0) / validReports.length
+        scoredReports.reduce((acc, r) => acc + (r.coherence_score || 0), 0) / scoredReports.length
     );
 
     // Obtener un resumen y puntos clave (tomamos el primero válido, idealmente los modelos más potentes suelen venir primero o ultimo)
-    const mainSummaryReport = validReports.find(r => r.summary);
+    const mainSummaryReport = scoredReports.find(r => r.summary);
     const mainSummary = mainSummaryReport?.summary;
-    const keyClaims = validReports.find(r => r.key_claims && Array.isArray(r.key_claims) && r.key_claims.length > 0)?.key_claims || [];
+    const keyClaims = scoredReports.find(r => r.key_claims && Array.isArray(r.key_claims) && r.key_claims.length > 0)?.key_claims || [];
 
     // Contenido en lenguaje ciudadano: se toma el primer reporte que lo traiga.
-    const plainEntry = validReports
+    const plainEntry = scoredReports
         .map((report) => ({ report, plain: readPlainContent(report) }))
         .find(
             ({ plain }) =>
@@ -892,11 +915,20 @@ export function AnalysisResults({ sourceId, politicianId, sourceUrl }: AnalysisR
             {/* Detalles por Modelo */}
             <div className="pt-2">
                 <Accordion type="single" collapsible className="w-full bg-slate-50 dark:bg-slate-900/30 rounded-xl border px-5">
-                    {validReports.map((report, index) => (
+                    {validReports.map((report, index) => {
+                        const discard = getConsensusDiscard(report);
+                        return (
                         <AccordionItem key={report.id} value={`item-${index}`} className="border-b-0 border-t border-slate-200 dark:border-slate-800 last:border-b-0 first:border-t-0">
                             <AccordionTrigger className="hover:no-underline py-4">
                                 <div className="flex justify-between w-full pr-4 items-center">
-                                    <span className="font-semibold text-sm">{report.model_name.split('/').pop()}</span>
+                                    <span className="font-semibold text-sm flex items-center gap-2">
+                                        {report.model_name.split('/').pop()}
+                                        {discard.discarded && (
+                                            <span className="rounded-full bg-amber-100 px-2 py-0.5 text-xs font-semibold text-amber-800 dark:bg-amber-900/40 dark:text-amber-300">
+                                                descartado del consenso
+                                            </span>
+                                        )}
+                                    </span>
                                     <div className="flex gap-4">
                                         <span className={`text-sm font-bold ${getScoreTextClass(report.veracity_score || 0)}`}>
                                             V: {report.veracity_score}%
@@ -905,6 +937,16 @@ export function AnalysisResults({ sourceId, politicianId, sourceUrl }: AnalysisR
                                 </div>
                             </AccordionTrigger>
                             <AccordionContent className="text-sm text-slate-600 dark:text-slate-400 pb-5 space-y-4">
+                                {discard.discarded && (
+                                    <div className="rounded-lg border border-amber-200 dark:border-amber-800/50 bg-amber-50 dark:bg-amber-950/20 p-3 text-amber-800 dark:text-amber-300">
+                                        <p className="font-semibold">
+                                            Descartado del consenso: naturaleza del contenido incoherente con el puntaje.
+                                        </p>
+                                        {discard.reason && (
+                                            <p className="mt-1 text-xs opacity-80">Motivo: {discard.reason}</p>
+                                        )}
+                                    </div>
+                                )}
                                 {report.summary && (
                                     <div>
                                         <strong className="text-xs uppercase tracking-wider text-slate-500 dark:text-slate-500 block mb-1">Resumen</strong>
@@ -920,7 +962,8 @@ export function AnalysisResults({ sourceId, politicianId, sourceUrl }: AnalysisR
                                 <TechnicalFallacies report={report} />
                             </AccordionContent>
                         </AccordionItem>
-                    ))}
+                        );
+                    })}
                 </Accordion>
             </div>
         </div>
