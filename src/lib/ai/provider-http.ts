@@ -104,7 +104,10 @@ export async function executeChatCompletion(
           { role: 'system', content: systemPrompt },
           { role: 'user', content: userContent },
         ],
-        temperature: 0.2,
+        // Un clasificador debe ser reproducible: la creatividad no aporta y sí
+        // introduce varianza entre corridas del mismo texto (mismo contenido,
+        // distinto veredicto).
+        temperature: 0,
         max_tokens: maxTokens,
       };
       if (includeReasoning) {
