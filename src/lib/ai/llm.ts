@@ -22,16 +22,29 @@ export interface LlmCallResult {
   outputTokens: number;
   latencyMs: number;
   provider: LlmProvider;
+  finishReason: string | null;
 }
 
 export interface ModelCheckResult {
   model_id: string;
+  // `provider` se conserva por compatibilidad y siempre refleja el usado.
   provider: LlmProvider;
+  provider_used: LlmProvider;
+  fallback_used: boolean;
+  // Id real enviado al proveedor (puede diferir del alias del catálogo).
+  routed_model_id: string;
   ok: boolean;
   http_status: number | null;
   latency_ms: number;
   content_chars: number;
   error_reason: CallFailureReason | null;
+  finish_reason: string | null;
+}
+
+export interface CheckModelOptions {
+  maxTokens?: number;
+  // Proveedor configurado en ai_model_config; si falta se usa el enrutador.
+  provider?: LlmProvider;
 }
 
 // Tabla de enrutamiento. Las claves se normalizan sin el sufijo `:free` para
@@ -68,13 +81,22 @@ const PROVIDER_FALLBACK_REASONS: ReadonlySet<CallFailureReason> = new Set([
   'http_429',
   'http_402',
   'http_4xx',
+  'empty_por_limite',
 ]);
 
 function normalizeModelId(modelId: string): string {
   return modelId.replace(/:free$/i, '');
 }
 
-export function providerForModel(modelId: string): LlmProvider {
+export function providerForModel(
+  modelId: string,
+  configuredProvider?: string | null
+): LlmProvider {
+  // La configuración de la base de datos manda; el mapa es el respaldo para
+  // llamadas que no traen provider (por ejemplo, desde el análisis).
+  if (configuredProvider === 'nvidia' || configuredProvider === 'openrouter') {
+    return configuredProvider;
+  }
   return PROVIDER_BY_MODEL[normalizeModelId(modelId)] ?? 'openrouter';
 }
 
@@ -88,6 +110,13 @@ function nvidiaModelFor(modelId: string): string {
   return NVIDIA_MODEL_BY_ALIAS[normalized] ?? normalized;
 }
 
+// Id real que se enviará al proveedor, incluida la traducción de alias.
+export function routedModelIdFor(modelId: string, provider: LlmProvider): string {
+  return provider === 'nvidia'
+    ? nvidiaModelFor(modelId)
+    : openRouterModelFor(modelId, providerForModel(modelId));
+}
+
 function nvidiaKey(): string | null {
   const key = process.env.NVIDIA_API_KEY;
   return key && key.trim() ? key.trim() : null;
@@ -96,6 +125,8 @@ function nvidiaKey(): string | null {
 interface RoutedOutcome {
   outcome: CompletionOutcome;
   provider: LlmProvider;
+  fallbackUsed: boolean;
+  routedModelId: string;
 }
 
 async function runRouted(
@@ -103,24 +134,27 @@ async function runRouted(
   apiKey: string,
   systemPrompt: string,
   userContent: string,
-  options: CompletionOptions
+  options: CompletionOptions,
+  providerOverride?: LlmProvider
 ): Promise<RoutedOutcome> {
-  const requested = providerForModel(modelId);
+  const requested = providerOverride ?? providerForModel(modelId);
   const nvidiaApiKey = nvidiaKey();
   // Fail-open: sin NVIDIA_API_KEY esos modelos se sirven desde OpenRouter.
   const primary: LlmProvider = requested === 'nvidia' && nvidiaApiKey ? 'nvidia' : 'openrouter';
+  const primaryModelId =
+    primary === 'nvidia' ? nvidiaModelFor(modelId) : openRouterModelFor(modelId, requested);
 
   const primaryOutcome =
     primary === 'nvidia'
       ? await callNvidia(
-          nvidiaModelFor(modelId),
+          primaryModelId,
           nvidiaApiKey as string,
           systemPrompt,
           userContent,
           options
         )
       : await callOpenRouter(
-          openRouterModelFor(modelId, requested),
+          primaryModelId,
           apiKey,
           systemPrompt,
           userContent,
@@ -128,24 +162,40 @@ async function runRouted(
         );
 
   if (primaryOutcome.failureReason === null) {
-    return { outcome: primaryOutcome, provider: primary };
+    return {
+      outcome: primaryOutcome,
+      provider: primary,
+      fallbackUsed: false,
+      routedModelId: primaryModelId,
+    };
   }
 
   if (primary === 'nvidia' && PROVIDER_FALLBACK_REASONS.has(primaryOutcome.failureReason)) {
     console.warn(
       `[llm] ${modelId} falló en NVIDIA (${primaryOutcome.failureReason}); se reintenta por OpenRouter`
     );
+    const fallbackModelId = openRouterModelFor(modelId, requested);
     const fallbackOutcome = await callOpenRouter(
-      openRouterModelFor(modelId, requested),
+      fallbackModelId,
       apiKey,
       systemPrompt,
       userContent,
       options
     );
-    return { outcome: fallbackOutcome, provider: 'openrouter' };
+    return {
+      outcome: fallbackOutcome,
+      provider: 'openrouter',
+      fallbackUsed: true,
+      routedModelId: fallbackModelId,
+    };
   }
 
-  return { outcome: primaryOutcome, provider: primary };
+  return {
+    outcome: primaryOutcome,
+    provider: primary,
+    fallbackUsed: false,
+    routedModelId: primaryModelId,
+  };
 }
 
 export async function callModel(
@@ -153,7 +203,12 @@ export async function callModel(
   apiKey: string,
   systemPrompt: string,
   userContent: string,
-  onFailure?: (reason: CallFailureReason, latencyMs: number, provider: LlmProvider) => void,
+  onFailure?: (
+    reason: CallFailureReason,
+    latencyMs: number,
+    provider: LlmProvider,
+    finishReason: string | null
+  ) => void,
   options: CompletionOptions = {}
 ): Promise<LlmCallResult | null> {
   const { outcome, provider } = await runRouted(
@@ -167,7 +222,7 @@ export async function callModel(
   if (outcome.failureReason !== null) {
     // Se propaga la latencia real (incluidos los timeouts) para que el cost log
     // no registre 0 ms en fallos que sí esperaron.
-    onFailure?.(outcome.failureReason, outcome.latencyMs, provider);
+    onFailure?.(outcome.failureReason, outcome.latencyMs, provider, outcome.finishReason);
     return null;
   }
 
@@ -178,31 +233,42 @@ export async function callModel(
     outputTokens: outcome.outputTokens,
     latencyMs: outcome.latencyMs,
     provider,
+    finishReason: outcome.finishReason,
   };
 }
 
-// Prueba mínima de un modelo: prompt corto y max_tokens bajo. No reintenta 429
-// para que el diagnóstico sea rápido e informe el estado real de cada modelo.
+// Prueba mínima de un modelo: prompt corto y max_tokens acotado. No reintenta
+// 429 para que el diagnóstico sea rápido e informe el estado real de cada modelo.
 export async function checkModel(
   modelId: string,
   apiKey: string,
-  maxTokens = 60
+  maxTokensOrOptions: number | CheckModelOptions = 200
 ): Promise<ModelCheckResult> {
-  const { outcome, provider } = await runRouted(
+  const options =
+    typeof maxTokensOrOptions === 'number'
+      ? { maxTokens: maxTokensOrOptions }
+      : maxTokensOrOptions;
+  const maxTokens = options.maxTokens ?? 200;
+  const { outcome, provider, fallbackUsed, routedModelId } = await runRouted(
     modelId,
     apiKey,
     'Responde únicamente con la palabra OK.',
     'Responde OK',
-    { maxTokens, retryOn429: false }
+    { maxTokens, retryOn429: false },
+    options.provider
   );
 
   return {
     model_id: modelId,
     provider,
+    provider_used: provider,
+    fallback_used: fallbackUsed,
+    routed_model_id: routedModelId,
     ok: outcome.failureReason === null,
     http_status: outcome.httpStatus,
     latency_ms: outcome.latencyMs,
     content_chars: outcome.content.length,
     error_reason: outcome.failureReason,
+    finish_reason: outcome.finishReason,
   };
 }
