@@ -40,6 +40,7 @@ Reglas:
 18. La explanation de cada falacia debe ser comprensible sin formación política: explica en lenguaje llano por qué el uso es engañoso, sin jerga.
 19. external_evidence: si recibes DATOS OFICIALES, contrástalos con lo que afirma el político. Cada elemento lleva claim (la afirmación citada), official_value (el dato oficial con su fecha), source ("Banco Central de Chile"), relation ("coincide", "difiere" o "no_comparable") y detail (explicación en lenguaje llano). Usa "coincide" si la cifra es equivalente (±0.1 puntos o ±1% relativo), "difiere" si no, y "no_comparable" si habla de otro periodo u otro indicador. No inventes cifras oficiales: si no están en los datos entregados, no las cites. Si no recibiste datos oficiales, devuelve "external_evidence": [].
 20. external_evidence NO modifica el veracity_score: son señales independientes. El veredicto y el score se calculan igual que sin datos oficiales.
+21. No cites números de puntaje (veracidad, coherencia, porcentajes del análisis) en plain_verdict ni en plain_summary. El sistema los muestra por separado con el promedio de todos los modelos, y citar tus propios números confunde al lector. Explica la valoración en palabras: «la mayoría de lo que dice se sostiene», «hay exageraciones», etc.
 
 Formato JSON exacto:
 {
