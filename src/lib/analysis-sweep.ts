@@ -22,7 +22,8 @@ export async function sweepStuckSources(admin: SupabaseClient, now: number = Dat
   const { data: reports, error: reportsError } = await admin
     .from('ai_reports')
     .select('source_id')
-    .in('source_id', ids);
+    .in('source_id', ids)
+    .is('superseded_at', null);
 
   if (reportsError) {
     throw new Error(`No se pudieron leer los reportes: ${reportsError.message}`);

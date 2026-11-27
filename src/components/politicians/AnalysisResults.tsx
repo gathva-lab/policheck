@@ -346,7 +346,7 @@ export function AnalysisResults({ sourceId, politicianId, sourceUrl }: AnalysisR
     const fetchReports = useCallback(async () => {
         const supabase = createClient();
         const [reportsRes, sourceRes] = await Promise.all([
-            supabase.from('ai_reports').select('*').eq('source_id', sourceId),
+            supabase.from('ai_reports').select('*').eq('source_id', sourceId).is('superseded_at', null),
             supabase.from('sources').select('verdict, verdict_score, mean_score, nature_override, consensus_agreement, jev_support, requires_review, status, analysis_error').eq('id', sourceId).maybeSingle(),
         ]);
 

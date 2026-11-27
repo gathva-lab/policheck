@@ -21,6 +21,7 @@ import {
 } from '@/lib/ai/llm';
 import { parseModelOutput, type ParsedAnalysis } from '@/lib/ai/parse';
 import { computeConsensus, type ModelReport } from '@/lib/consensus';
+import { detectUnstableModels, type StabilityReport } from '@/lib/stability';
 import { buildAttempts, pickTriplet, type AttemptCandidate } from '@/lib/ai/model-selection';
 import { normalizeUrl } from '@/lib/url';
 import {
@@ -233,7 +234,8 @@ async function saveJevToReports(
   const { data, error } = await admin
     .from('ai_reports')
     .select('id, report_json')
-    .eq('source_id', sourceId);
+    .eq('source_id', sourceId)
+    .is('superseded_at', null);
   if (error) {
     console.error('[analyze] Error leyendo ai_reports para guardar JEV:', {
       source_id: sourceId,
@@ -275,7 +277,8 @@ async function saveConsensusDiscards(
   const { data, error } = await admin
     .from('ai_reports')
     .select('id, model_name, report_json')
-    .eq('source_id', sourceId);
+    .eq('source_id', sourceId)
+    .is('superseded_at', null);
   if (error) {
     console.error('[analyze] Error leyendo ai_reports para guardar descartes:', {
       source_id: sourceId,
@@ -393,16 +396,54 @@ export async function POST(request: Request) {
   // del análisis y marcarla aunque la extracción falle o se agote.
   const startedAtIso = new Date().toISOString();
   let source: Record<string, unknown>;
+  // Reportes vigentes de la corrida anterior, capturados antes de marcarlos
+  // como superseded_at para poder comparar estabilidad entre corridas.
+  let previousRunReports: StabilityReport[] = [];
 
   if (existing && force) {
-    // Re-análisis: borrar reportes previos y resetear el veredicto antes de volver a analizar
+    // Re-análisis: se conserva el historial de reportes. Los de la corrida
+    // anterior se marcan con superseded_at y dejan de ser los vigentes.
     source = existing;
     sourceId = existing.id;
 
-    const { error: deleteError } = await admin.from('ai_reports').delete().eq('source_id', sourceId);
-    if (deleteError) {
-      console.error('[analyze] Error borrando ai_reports previos:', deleteError);
-      return NextResponse.json({ error: 'No se pudieron borrar los reportes previos' }, { status: 500 });
+    const { data: previousRows, error: previousError } = await admin
+      .from('ai_reports')
+      .select('model_name, veracity_score, report_json')
+      .eq('source_id', sourceId)
+      .is('superseded_at', null);
+    if (previousError) {
+      console.error('[analyze] Error leyendo ai_reports previos:', previousError);
+    } else {
+      previousRunReports = ((previousRows ?? []) as Array<{
+        model_name: string;
+        veracity_score: number | null;
+        report_json: unknown;
+      }>).map((row) => {
+        const raw = row.report_json;
+        const nature =
+          raw && typeof raw === 'object' && !Array.isArray(raw)
+            ? (raw as { content_nature?: unknown }).content_nature
+            : null;
+        return {
+          modelName: row.model_name,
+          veracityScore:
+            typeof row.veracity_score === 'number' ? row.veracity_score : null,
+          contentNature:
+            nature === 'opinion' || nature === 'mixto' || nature === 'factual'
+              ? nature
+              : null,
+        };
+      });
+    }
+
+    const { error: supersedeError } = await admin
+      .from('ai_reports')
+      .update({ superseded_at: startedAtIso })
+      .eq('source_id', sourceId)
+      .is('superseded_at', null);
+    if (supersedeError) {
+      console.error('[analyze] Error marcando ai_reports previos como superseded_at:', supersedeError);
+      return NextResponse.json({ error: 'No se pudieron archivar los reportes previos' }, { status: 500 });
     }
 
     const { error: resetError } = await admin
@@ -410,6 +451,8 @@ export async function POST(request: Request) {
       .update({
         verdict: null,
         verdict_score: null,
+        candidate_median_score: null,
+        model_variance: null,
         mean_score: null,
         nature_override: false,
         consensus_agreement: null,
@@ -882,6 +925,14 @@ export async function POST(request: Request) {
   const parsedModels = successes.filter((s) => s.parsed.report !== null);
   const reports: ModelReport[] = parsedModels.map((s) => s.parsed.report as ModelReport);
 
+  // Comparación de estabilidad contra la corrida anterior (si hubo re-análisis).
+  const currentRunReports: StabilityReport[] = reports.map((report) => ({
+    modelName: report.modelName,
+    veracityScore: report.veracityScore,
+    contentNature: report.contentNature,
+  }));
+  const modelVariance = detectUnstableModels(currentRunReports, previousRunReports);
+
   // Diagnóstico del intento multi-modelo: modelos intentados (incluye fallbacks),
   // modelos que produjeron reporte y cuántos fallaron por timeout. Se guarda en
   // cada reporte para que la UI pueda mostrar "N de M modelos respondieron".
@@ -1065,6 +1116,8 @@ export async function POST(request: Request) {
       status: finalStatus,
       verdict: consensus.verdictLabel,
       verdict_score: consensus.verdictScore,
+      candidate_median_score: consensus.candidateMedianScore,
+      model_variance: modelVariance.length > 0 ? modelVariance : null,
       mean_score: consensus.meanScore,
       nature_override: consensus.natureOverride,
       consensus_agreement: finalAgreement,
@@ -1130,7 +1183,11 @@ export async function POST(request: Request) {
         const admin = supabaseAdmin();
         const [{ data: currentSource }, { count }] = await Promise.all([
           admin.from('sources').select('status').eq('id', sourceId).maybeSingle(),
-          admin.from('ai_reports').select('id', { count: 'exact', head: true }).eq('source_id', sourceId),
+          admin
+            .from('ai_reports')
+            .select('id', { count: 'exact', head: true })
+            .eq('source_id', sourceId)
+            .is('superseded_at', null),
         ]);
         if (
           (currentSource?.status === 'no_verificada' || currentSource?.status === 'procesando') &&
