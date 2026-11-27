@@ -47,6 +47,24 @@ describe('callModel', () => {
     expect(console.warn).toHaveBeenCalledWith(expect.stringContaining('razonó sin emitir respuesta'));
   });
 
+  it('clasifica empty_por_limite cuando finish_reason es length y no hay content', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        jsonResponse({
+          choices: [{ finish_reason: 'length', message: { content: '' } }],
+          usage: { prompt_tokens: 10, completion_tokens: 60 },
+        })
+      )
+    );
+
+    const onFailure = vi.fn();
+    const result = await callModel('modelo/x', 'key', 'sistema', 'usuario', onFailure);
+
+    expect(result).toBeNull();
+    expect(onFailure).toHaveBeenCalledWith('empty_por_limite', expect.any(Number));
+  });
+
   it('clasifica HTTP 402 como falta de crédito', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse({}, 402)));
 

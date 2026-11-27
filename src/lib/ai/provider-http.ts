@@ -19,6 +19,11 @@ export type CallFailureReason =
   | 'http_402'
   | 'http_4xx'
   | 'empty'
+  // El modelo se quedó sin presupuesto de salida (finish_reason = length) y no
+  // emitió contenido: distinto de un vacío sin causa conocida.
+  | 'empty_por_limite'
+  // El id enrutado no existe en el catálogo del proveedor configurado.
+  | 'modelo_no_existe_en_proveedor'
   | 'parse_failed';
 
 export interface CompletionOptions {
@@ -34,6 +39,8 @@ export interface CompletionOutcome {
   latencyMs: number;
   httpStatus: number | null;
   failureReason: CallFailureReason | null;
+  // Motivo de término informado por el proveedor (choices[0].finish_reason).
+  finishReason: string | null;
 }
 
 export interface CompletionRequest {
@@ -74,7 +81,8 @@ export async function executeChatCompletion(
   const fail = (
     reason: CallFailureReason,
     httpStatus: number | null,
-    latencyMs: number
+    latencyMs: number,
+    finishReason: string | null = null
   ): CompletionOutcome => ({
     content: '',
     inputTokens: 0,
@@ -82,6 +90,7 @@ export async function executeChatCompletion(
     latencyMs,
     httpStatus,
     failureReason: reason,
+    finishReason,
   });
 
   for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
@@ -145,6 +154,7 @@ export async function executeChatCompletion(
 
       const data = (await response.json()) as {
         choices?: Array<{
+          finish_reason?: unknown;
           message?: {
             content?: unknown;
             reasoning?: unknown;
@@ -153,7 +163,10 @@ export async function executeChatCompletion(
         }>;
         usage?: { prompt_tokens?: unknown; completion_tokens?: unknown };
       };
-      const message = data?.choices?.[0]?.message;
+      const choice = data?.choices?.[0];
+      const finishReason =
+        typeof choice?.finish_reason === 'string' ? choice.finish_reason : null;
+      const message = choice?.message;
       const content = message?.content;
       if (typeof content !== 'string' || !content.trim()) {
         const reasoning = message?.reasoning ?? message?.reasoning_content;
@@ -162,7 +175,14 @@ export async function executeChatCompletion(
             `[${label}] ${modelId} razonó sin emitir respuesta (${reasoning.length} caracteres de reasoning y content vacío)`
           );
         }
-        return fail('empty', httpStatus, latencyMs);
+        // finish_reason = length con content vacío indica que el presupuesto de
+        // salida (max_tokens) se agotó razonando antes de emitir la respuesta.
+        return fail(
+          finishReason === 'length' ? 'empty_por_limite' : 'empty',
+          httpStatus,
+          latencyMs,
+          finishReason
+        );
       }
 
       return {
@@ -172,6 +192,7 @@ export async function executeChatCompletion(
         latencyMs,
         httpStatus,
         failureReason: null,
+        finishReason,
       };
     } catch (error) {
       const aborted = controller.signal.aborted;
