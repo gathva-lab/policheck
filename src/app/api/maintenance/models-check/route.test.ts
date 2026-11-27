@@ -120,6 +120,10 @@ describe('/api/maintenance/models-check validación NVIDIA', () => {
     expect(results[0].fallback_used).toBe(false);
     expect(results[0].ok).toBe(true);
     expect(results[0].finish_reason).toBe('stop');
+    // La latencia se rotula como mínima: no representa una transcripción larga.
+    expect(results[0]).toHaveProperty('latency_ms_min');
+    expect(results[0].latency_ms).toBeUndefined();
+    expect(String(results[0].nota)).toContain('entrada mínima');
   });
 });
 
