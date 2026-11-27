@@ -5,6 +5,7 @@ import {
   nombreCompleto,
   normalizarNombre,
   parsearSenadoresXml,
+  repararDobleEncoding,
 } from './senado';
 
 const XML_MUESTRA = `<?xml version="1.0" encoding="ISO-8859-1"?>
@@ -87,7 +88,86 @@ describe('decodificarEntidadesHtml', () => {
   });
 });
 
+describe('repararDobleEncoding', () => {
+  const CASOS: ReadonlyArray<readonly [string, string]> = [
+    ['Ã¡', 'á'],
+    ['Ã©', 'é'],
+    ['Ã\u00ad', 'í'],
+    ['Ã³', 'ó'],
+    ['Ãº', 'ú'],
+    ['Ã±', 'ñ'],
+    ['Ã\u0081', 'Á'],
+    ['Ã\u0089', 'É'],
+    ['Ã\u008d', 'Í'],
+    ['Ã\u0093', 'Ó'],
+    ['Ã\u009a', 'Ú'],
+    ['Ã\u0091', 'Ñ'],
+  ];
+
+  it.each(CASOS)('repara %s y es idempotente', (corrupto, correcto) => {
+    expect(repararDobleEncoding(corrupto)).toBe(correcto);
+    expect(repararDobleEncoding(repararDobleEncoding(corrupto))).toBe(correcto);
+  });
+
+  it('no modifica un texto que ya está bien codificado', () => {
+    const texto = 'Iván Flores García · Región de Ñuble';
+    expect(repararDobleEncoding(texto)).toBe(texto);
+  });
+
+  it('repara un nombre doblemente codificado al parsear el XML', () => {
+    const xml = `<senadores><senador>
+      <PARLID>404</PARLID>
+      <PARLNOMBRE>IvÃ¡n</PARLNOMBRE>
+      <PARLAPELLIDOPATERNO>GarcÃ\u00ada</PARLAPELLIDOPATERNO>
+      <PARLAPELLIDOMATERNO>MuÃ±oz</PARLAPELLIDOMATERNO>
+      <REGION>RegiÃ³n</REGION>
+      <CIRCUNSCRIPCION>Circunscripción 9</CIRCUNSCRIPCION>
+      <PARTIDO>Independiente</PARTIDO>
+    </senador></senadores>`;
+
+    const [senador] = parsearSenadoresXml(xml);
+
+    expect(senador.nombre).toBe('Iván');
+    expect(senador.apellidoPaterno).toBe('García');
+    expect(senador.apellidoMaterno).toBe('Muñoz');
+    expect(senador.region).toBe('Región');
+  });
+});
+
 describe('fetchSenadoresVigentes', () => {
+  it('decodifica los bytes UTF-8 c3 b3 como Región con acento', async () => {
+    const xmlUtf8 = `<?xml version="1.0" encoding="UTF-8"?>
+<senadores>
+  <senador>
+    <PARLID>303</PARLID>
+    <PARLAPELLIDOPATERNO>Flores</PARLAPELLIDOPATERNO>
+    <PARLAPELLIDOMATERNO>García</PARLAPELLIDOMATERNO>
+    <PARLNOMBRE>Iván</PARLNOMBRE>
+    <REGION>Región</REGION>
+    <CIRCUNSCRIPCION>Circunscripción 8</CIRCUNSCRIPCION>
+    <PARTIDO>Independiente</PARTIDO>
+    <EMAIL></EMAIL>
+    <CURRICULUM></CURRICULUM>
+  </senador>
+</senadores>`;
+    const bytes = new TextEncoder().encode(xmlUtf8);
+    const tieneSecuenciaUtf8DeO = bytes.some(
+      (byte, indice) => byte === 0xc3 && bytes[indice + 1] === 0xb3
+    );
+    expect(tieneSecuenciaUtf8DeO).toBe(true);
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(new Response(bytes, { status: 200 }))
+    );
+
+    const senadores = await fetchSenadoresVigentes();
+
+    expect(senadores[0].region).toBe('Región');
+    expect(senadores[0].nombre).toBe('Iván');
+    expect(senadores[0].apellidoMaterno).toBe('García');
+  });
+
   it('descarga y parsea el XML del Senado', async () => {
     const fetchMock = vi.fn().mockResolvedValue(
       new Response(XML_MUESTRA, {
