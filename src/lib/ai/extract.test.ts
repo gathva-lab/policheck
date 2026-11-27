@@ -105,15 +105,62 @@ describe('extractYoutube fallback por captionTracks', () => {
     expect(parseTimedText('<text>a &amp;#39;b&amp;#39;</text>')).toBe("a 'b'");
   });
 
-  it('lanza NoTranscriptError cuando los tres intentos fallan y la descripción es corta', async () => {
+  it('distingue el video sin subtítulos del bloqueo y no reintenta', async () => {
+    h.transcript.mockResolvedValue([]);
+    const fetchMock = mockYoutubeFetch(
+      '<html><head><meta name="description" content="Descripción corta"></head><body></body></html>',
+      ''
+    );
+    vi.stubGlobal('fetch', fetchMock);
+
+    const error = await extractYoutube('https://www.youtube.com/watch?v=abc').catch(
+      (caught: unknown) => caught
+    );
+
+    expect(error).toBeInstanceOf(NoTranscriptError);
+    expect((error as NoTranscriptError).retryable).toBe(false);
+    expect((error as NoTranscriptError).message).toBe(
+      'Este video no tiene subtítulos ni descripción con texto suficiente.'
+    );
+    expect(h.transcript).toHaveBeenCalledTimes(2);
+  });
+
+  it('reintenta con espera exponencial cuando YouTube bloquea las peticiones', async () => {
+    const delays: number[] = [];
+    const realSetTimeout = global.setTimeout;
+    const timerSpy = vi.spyOn(global, 'setTimeout').mockImplementation(((
+      callback: (...args: unknown[]) => void,
+      ms?: number,
+      ...args: unknown[]
+    ) => {
+      delays.push(Number(ms));
+      // Solo se aceleran las esperas entre reintentos; los timeouts reales se
+      // dejan intactos para no alterar el presupuesto de extracción.
+      const wait = ms === 500 || ms === 1500 ? 0 : ms;
+      return realSetTimeout(callback, wait, ...args);
+    }) as typeof setTimeout);
+
     h.transcript.mockResolvedValue([]);
     const fetchMock = mockYoutubeFetch('<html><head></head><body></body></html>', '');
     vi.stubGlobal('fetch', fetchMock);
 
-    await expect(extractYoutube('https://www.youtube.com/watch?v=abc')).rejects.toBeInstanceOf(
-      NoTranscriptError
-    );
-    expect(h.transcript).toHaveBeenCalledTimes(2);
+    try {
+      const error = await extractYoutube('https://www.youtube.com/watch?v=abc').catch(
+        (caught: unknown) => caught
+      );
+      expect(error).toBeInstanceOf(NoTranscriptError);
+      expect((error as NoTranscriptError).retryable).toBe(true);
+      expect((error as NoTranscriptError).message).toBe(
+        'YouTube está limitando las peticiones desde este servidor. Vuelve a intentarlo en unos minutos.'
+      );
+    } finally {
+      timerSpy.mockRestore();
+    }
+
+    // Dos intentos de transcripción por cada una de las 3 pasadas completas.
+    expect(h.transcript).toHaveBeenCalledTimes(6);
+    expect(delays).toContain(500);
+    expect(delays).toContain(1500);
   });
 
   it('usa el reintento cuando falla youtube-transcript y no hay captionTracks', async () => {
