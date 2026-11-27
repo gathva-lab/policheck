@@ -13,6 +13,7 @@ function report(partial: Partial<ModelReport>): ModelReport {
     quotes: null,
     fallacies: null,
     contentNature: null,
+    externalEvidence: null,
     ...partial,
   };
 }
@@ -114,5 +115,31 @@ describe('justificationContradictsVerdict', () => {
   it('no descarta veredictos neutros', () => {
     expect(justificationContradictsVerdict('discutible', 'Hay evidencia mixta')).toBe(false);
     expect(justificationContradictsVerdict('inchequeable', 'No hay datos')).toBe(false);
+  });
+});
+
+describe('computeConsensus: external_evidence es independiente del score', () => {
+  it('un dato oficial que difiere no cambia el veracity_score ni el consenso', () => {
+    const evidence = [
+      {
+        claim: 'La inflación fue de 5%',
+        officialValue: '0,5% en octubre de 2026',
+        source: 'Banco Central de Chile',
+        relation: 'difiere' as const,
+        detail: 'La cifra oficial es menor.',
+      },
+    ];
+    const base = computeConsensus([
+      report({ modelName: 'a', verdictLabel: 'discutible', veracityScore: 65 }),
+      report({ modelName: 'b', verdictLabel: 'discutible', veracityScore: 65 }),
+    ]);
+    const withEvidence = computeConsensus([
+      report({ modelName: 'a', verdictLabel: 'discutible', veracityScore: 65, externalEvidence: evidence }),
+      report({ modelName: 'b', verdictLabel: 'discutible', veracityScore: 65, externalEvidence: evidence }),
+    ]);
+
+    expect(withEvidence.averageVeracity).toBe(base.averageVeracity);
+    expect(withEvidence.verdictLabel).toBe(base.verdictLabel);
+    expect(withEvidence.consensusAgreement).toBe(base.consensusAgreement);
   });
 });

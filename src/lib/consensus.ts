@@ -27,6 +27,20 @@ export interface ReportFallacy {
 
 export type ContentNature = 'opinion' | 'mixto' | 'factual';
 
+// Relación entre lo afirmado y el dato oficial. Catálogo cerrado: cualquier
+// otro valor se descarta al parsear.
+export const EXTERNAL_RELATIONS = ['coincide', 'difiere', 'no_comparable'] as const;
+
+export type ExternalRelation = (typeof EXTERNAL_RELATIONS)[number];
+
+export interface ReportExternalEvidence {
+  claim: string;
+  officialValue: string;
+  source: string;
+  relation: ExternalRelation;
+  detail: string;
+}
+
 export interface ModelReport {
   modelName: string;
   verdictLabel: VerdictLabel | null;
@@ -40,6 +54,9 @@ export interface ModelReport {
   quotes: ReportQuote[] | null;
   fallacies: ReportFallacy[] | null;
   contentNature: ContentNature | null;
+  // Contraste con fuentes oficiales (Banco Central). No afecta al veredicto ni
+  // al veracity_score: es una señal independiente.
+  externalEvidence: ReportExternalEvidence[] | null;
 }
 
 export interface ConsensusResult {

@@ -206,3 +206,84 @@ describe('parseModelOutput: falacias retóricas', () => {
     ]);
   });
 });
+
+describe('parseModelOutput: external_evidence', () => {
+  it('extrae evidencias oficiales válidas y descarta relaciones desconocidas', () => {
+    const content = JSON.stringify({
+      verdict_label: 'discutible',
+      veracity_score: 65,
+      coherence_score: 60,
+      summary: 'Resumen',
+      external_evidence: [
+        {
+          claim: 'La inflación fue de 1,5%',
+          official_value: '0,5% en octubre de 2026',
+          source: 'Banco Central de Chile',
+          relation: 'difiere',
+          detail: 'La cifra oficial es menor.',
+        },
+        {
+          claim: 'El dólar llegó a 1200',
+          official_value: '1008,79 el 20-11-2026',
+          source: 'Banco Central de Chile',
+          relation: 'inventada',
+          detail: 'No debe aceptarse.',
+        },
+      ],
+    });
+
+    const { report } = parseModelOutput('modelo/test', content);
+
+    expect(report?.externalEvidence).toEqual([
+      {
+        claim: 'La inflación fue de 1,5%',
+        officialValue: '0,5% en octubre de 2026',
+        source: 'Banco Central de Chile',
+        relation: 'difiere',
+        detail: 'La cifra oficial es menor.',
+      },
+    ]);
+  });
+
+  it('devuelve null si el campo está ausente o mal formado', () => {
+    const base = {
+      verdict_label: 'verdadero',
+      veracity_score: 90,
+      coherence_score: 85,
+      summary: 'Resumen',
+    };
+
+    expect(parseModelOutput('modelo/test', JSON.stringify(base)).report?.externalEvidence).toBeNull();
+    expect(
+      parseModelOutput('modelo/test', JSON.stringify({ ...base, external_evidence: 'no es arreglo' }))
+        .report?.externalEvidence
+    ).toBeNull();
+    expect(
+      parseModelOutput('modelo/test', JSON.stringify({ ...base, external_evidence: [] }))
+        .report?.externalEvidence
+    ).toBeNull();
+  });
+
+  it('external_evidence no altera el veracity_score del reporte', () => {
+    const content = JSON.stringify({
+      verdict_label: 'exagerado',
+      veracity_score: 35,
+      coherence_score: 60,
+      summary: 'Resumen',
+      external_evidence: [
+        {
+          claim: 'La inflación fue de 5%',
+          official_value: '0,5% en octubre de 2026',
+          source: 'Banco Central de Chile',
+          relation: 'difiere',
+          detail: 'La cifra oficial es diez veces menor.',
+        },
+      ],
+    });
+
+    const { report } = parseModelOutput('modelo/test', content);
+
+    expect(report?.veracityScore).toBe(35);
+    expect(report?.externalEvidence?.[0].relation).toBe('difiere');
+  });
+});
