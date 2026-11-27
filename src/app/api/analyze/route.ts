@@ -21,6 +21,12 @@ import { computeConsensus, type ModelReport } from '@/lib/consensus';
 import { buildAttempts, pickTriplet, type AttemptCandidate } from '@/lib/ai/model-selection';
 import { normalizeUrl } from '@/lib/url';
 import {
+  buildOfficialContext,
+  getSeries,
+  type BcchSeries,
+} from '@/lib/external/bcch';
+import { detectIndicators } from '@/lib/external/detect';
+import {
   isVerifiable,
   jevConsensus,
   jevCostUsd,
@@ -37,6 +43,78 @@ export const maxDuration = 300;
 
 const DAILY_LIMIT = 5;
 const MIN_VALID_MODELS = 2;
+
+// Cache en memoria del isolate por (seriesId, día). Evita repetir consultas al
+// Banco Central dentro de la misma jornada. Un null también se cachea: si la
+// fuente externa falló hoy, no se insiste en cada análisis.
+const bcchSeriesCache = new Map<string, BcchSeries | null>();
+
+function isoDay(date: Date): string {
+  return date.toISOString().slice(0, 10);
+}
+
+function daysAgoIso(days: number): string {
+  const date = new Date();
+  date.setUTCDate(date.getUTCDate() - days);
+  return isoDay(date);
+}
+
+function monthsAgoIso(months: number): string {
+  const date = new Date();
+  date.setUTCMonth(date.getUTCMonth() - months);
+  return isoDay(date);
+}
+
+interface OfficialContextResult {
+  context: string | null;
+  // true cuando hubo indicadores detectados y una key configurada: se consultó
+  // (o se reutilizó caché de) la fuente externa y corresponde trazar el coste.
+  queried: boolean;
+}
+
+// Consulta las series detectadas en paralelo y arma el bloque de contexto.
+// Es fail-open: cualquier error devuelve contexto nulo y el análisis sigue.
+async function loadOfficialContext(
+  text: string,
+  apiKey: string | undefined
+): Promise<OfficialContextResult> {
+  if (!apiKey) {
+    console.warn('[analyze] BCCH_API_KEY no configurada; se omite el contraste externo');
+    return { context: null, queried: false };
+  }
+
+  const indicators = detectIndicators(text);
+  if (indicators.length === 0) return { context: null, queried: false };
+
+  try {
+    const today = isoDay(new Date());
+    const entries = await Promise.all(
+      indicators.map(async (info) => {
+        const cacheKey = `${info.id}:${today}`;
+        if (bcchSeriesCache.has(cacheKey)) {
+          return { info, series: bcchSeriesCache.get(cacheKey) ?? null };
+        }
+        const series = await getSeries(
+          {
+            seriesId: info.id,
+            firstDate: info.freq === 'mensual' ? monthsAgoIso(13) : daysAgoIso(30),
+            lastDate: today,
+          },
+          apiKey
+        );
+        bcchSeriesCache.set(cacheKey, series);
+        return { info, series };
+      })
+    );
+
+    return { context: buildOfficialContext(entries), queried: true };
+  } catch (error) {
+    console.warn('[analyze] Falló la consulta al Banco Central; se continúa sin datos oficiales:', {
+      error: error instanceof Error ? error.message : error,
+    });
+    return { context: null, queried: true };
+  }
+}
 
 // Precios verificados contra la API de OpenRouter el 2026-11-25.
 const PRICE_PER_1M_TOKENS: Record<string, { input: number; output: number }> = {
@@ -439,6 +517,37 @@ export async function POST(request: Request) {
     });
   }
 
+  etapa = 'contraste_externo';
+  await setStage('contraste_externo');
+  // 4b. Contraste con datos oficiales del Banco Central. Se detectan indicadores
+  // en el contenido y se consultan sus series en paralelo (con caché por día).
+  // Si no hay key o la consulta falla, el análisis continúa sin el bloque.
+  const official = await loadOfficialContext(content.text, process.env.BCCH_API_KEY);
+  if (official.queried) {
+    // Trazabilidad: deja constancia de que hubo contraste externo, con coste 0.
+    const { error: externalCostError } = await admin.from('ai_cost_log').insert({
+      source_id: sourceId,
+      model_id: 'bcch:bde',
+      input_tokens: 0,
+      output_tokens: 0,
+      cost_usd: 0,
+      latency_ms: 0,
+      tier: 'external',
+    });
+    if (externalCostError) {
+      console.error('[analyze] Error insertando ai_cost_log del Banco Central:', {
+        source_id: sourceId,
+        error: externalCostError,
+      });
+    }
+  }
+
+  // El bloque oficial se antepone al contenido de usuario de cada modelo.
+  // El system prompt no se modifica.
+  const userContent = official.context
+    ? `${official.context}\n\n${content.text}`
+    : content.text;
+
   etapa = 'modelos';
   await setStage('modelos');
   // 5. Componer el triplete activo: 1 free + 2 eco (familias distintas).
@@ -492,7 +601,7 @@ export async function POST(request: Request) {
           candidate.modelId,
           apiKey,
           FEVER_SYSTEM_PROMPT,
-          content.text,
+          userContent,
           (reason, latencyMs) => {
             candidateFailure = reason;
             candidateLatencyMs = latencyMs;
