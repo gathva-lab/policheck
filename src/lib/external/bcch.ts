@@ -22,14 +22,14 @@ export const BCCH_SERIES: BcchSeriesInfo[] = [
   {
     id: 'F073.TCO.PRE.Z.D',
     label: 'Dólar observado',
-    keywords: ['dólar', 'dolar', 'tipo de cambio', 'peso'],
+    keywords: ['dólar', 'tipo de cambio', 'peso'],
     unit: 'CLP/USD',
     freq: 'diaria',
   },
   {
     id: 'F074.IPC.VAR.Z.EP23.C.M',
     label: 'Inflación mensual (IPC)',
-    keywords: ['inflación', 'inflacion', 'ipc', 'costo de vida', 'precios'],
+    keywords: ['inflación', 'ipc', 'costo de vida', 'precios'],
     unit: '%',
     freq: 'mensual',
   },

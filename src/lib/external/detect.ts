@@ -18,9 +18,8 @@ function countKeyword(haystack: string, keyword: string): number {
     'gu'
   );
   let count = 0;
-  for (const _match of haystack.matchAll(pattern)) {
-    count += 1;
-  }
+  const matches = haystack.match(pattern);
+  if (matches) count = matches.length;
   return count;
 }
 
