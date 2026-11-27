@@ -210,6 +210,58 @@ describe('POST /api/maintenance/parlamentarios', () => {
   });
 });
 
+describe('GET /api/maintenance/parlamentarios', () => {
+  it('informa el conteo y marca encodingSospechoso con nombres corruptos', async () => {
+    h.tablas.parliamentarians.push({
+      parl_id: '101',
+      nombre: 'IvÃ¡n Flores',
+      nombre_normalizado: 'ivan flores',
+      apellido_paterno: 'Flores',
+      apellido_materno: 'GarcÃa',
+      region: 'RegiÃ³n',
+      partido: 'Independiente',
+      politician_id: null,
+      match_confirmado: false,
+    });
+    const { GET } = await import('./route');
+
+    const response = await GET();
+    const body = (await response.json()) as {
+      conteo?: number;
+      encodingSospechoso?: boolean;
+    };
+
+    expect(response.status).toBe(200);
+    expect(body.conteo).toBe(1);
+    expect(body.encodingSospechoso).toBe(true);
+  });
+
+  it('marca encodingSospechoso en false cuando los nombres están correctos', async () => {
+    h.tablas.parliamentarians.push({
+      parl_id: '202',
+      nombre: 'Iván Flores García',
+      nombre_normalizado: 'ivan flores garcia',
+      apellido_paterno: 'Flores',
+      apellido_materno: 'García',
+      region: 'Región',
+      partido: 'Independiente',
+      politician_id: null,
+      match_confirmado: false,
+    });
+    const { GET } = await import('./route');
+
+    const response = await GET();
+    const body = (await response.json()) as {
+      conteo?: number;
+      encodingSospechoso?: boolean;
+    };
+
+    expect(response.status).toBe(200);
+    expect(body.conteo).toBe(1);
+    expect(body.encodingSospechoso).toBe(false);
+  });
+});
+
 describe('PATCH /api/maintenance/parlamentarios', () => {
   it('rechaza con 400 un politician_id ya vinculado a otro parl_id', async () => {
     h.tablas.parliamentarians.push(
