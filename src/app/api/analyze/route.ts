@@ -161,6 +161,7 @@ interface AttemptFailure {
   // Latencia real transcurrida hasta el fallo (incluye timeouts).
   latencyMs: number;
   provider: LlmProvider;
+  finishReason: string | null;
 }
 
 interface AttemptOutcome {
@@ -207,6 +208,7 @@ async function logJevCost(
     latency_ms: latencyMs,
     tier: 'eco',
     provider: 'openrouter',
+    finish_reason: null,
   });
   if (error) {
     console.error('[analyze] Error insertando ai_cost_log de JEV:', {
@@ -602,6 +604,7 @@ export async function POST(request: Request) {
       latency_ms: 0,
       tier: 'external',
       provider: 'external',
+      finish_reason: null,
     });
     if (externalCostError) {
       console.error('[analyze] Error insertando ai_cost_log del Banco Central:', {
@@ -656,6 +659,7 @@ export async function POST(request: Request) {
     'http_429',
     'http_4xx',
     'empty',
+    'empty_por_limite',
   ]);
 
   // 5. Llamada multi-modelo en paralelo con fallback por modelo.
@@ -667,15 +671,17 @@ export async function POST(request: Request) {
         let candidateFailure: CallFailureReason | null = null;
         let candidateLatencyMs = 0;
         let candidateProvider: LlmProvider = 'openrouter';
+        let candidateFinishReason: string | null = null;
         const result = await callModel(
           candidate.modelId,
           apiKey,
           FEVER_SYSTEM_PROMPT,
           userContent,
-          (reason, latencyMs, provider) => {
+          (reason, latencyMs, provider, finishReason) => {
             candidateFailure = reason;
             candidateLatencyMs = latencyMs;
             candidateProvider = provider;
+            candidateFinishReason = finishReason;
           },
           { timeoutMs: modelTimeoutMs }
         );
@@ -694,6 +700,7 @@ export async function POST(request: Request) {
           reason,
           latencyMs: candidateLatencyMs,
           provider: candidateProvider,
+          finishReason: candidateFinishReason,
         });
         // Cortacircuitos: solo se intenta el fallback en fallos transitorios.
         if (!FALLBACK_REASONS.has(reason)) break;
@@ -713,7 +720,15 @@ export async function POST(request: Request) {
       call: null,
       failureReason: 'http_error',
       failures: primary
-        ? [{ ...primary, reason: 'http_error', latencyMs: 0, provider: 'openrouter' }]
+        ? [
+            {
+              ...primary,
+              reason: 'http_error',
+              latencyMs: 0,
+              provider: 'openrouter',
+              finishReason: null,
+            },
+          ]
         : [],
     };
   });
@@ -748,6 +763,7 @@ export async function POST(request: Request) {
         reason: outcome.failureReason ?? 'parse_failed',
         latencyMs: outcome.call.latencyMs,
         provider: outcome.call.provider,
+        finishReason: outcome.call.finishReason,
       });
     }
     // Red de seguridad: ningún modelo del triplete puede quedar sin fila.
@@ -759,6 +775,7 @@ export async function POST(request: Request) {
           reason: outcome.failureReason ?? 'http_error',
           latencyMs: 0,
           provider: 'openrouter',
+          finishReason: null,
         });
       }
     }
@@ -780,6 +797,7 @@ export async function POST(request: Request) {
         tier: failure.tier,
         error_reason: failure.reason,
         provider: failure.provider,
+        finish_reason: failure.finishReason,
       });
       if (failedCostError) {
         console.error('[analyze] Error insertando ai_cost_log de modelo fallido:', {
@@ -873,6 +891,7 @@ export async function POST(request: Request) {
       latency_ms: s.latencyMs,
       tier: s.tier,
       provider: s.provider,
+      finish_reason: s.finishReason,
     });
     if (costError) {
       // El cost log es telemetría: no bloquea el flujo, solo se registra.
