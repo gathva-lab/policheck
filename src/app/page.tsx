@@ -1,3 +1,4 @@
+import Link from "next/link";
 import { supabase } from "@/lib/supabase";
 import { PoliticianCard } from "@/components/politicians/PoliticianCard";
 import { Search, Users2, ShieldCheck } from "lucide-react";
@@ -97,6 +98,12 @@ export default async function Home() {
               <span>Análisis con <strong className="text-foreground">4 modelos de IA</strong></span>
             </div>
           </div>
+
+          <p className="mt-5 text-xs text-muted-foreground">
+            <Link href="/como-funciona" className="underline-offset-4 hover:text-foreground hover:underline">
+              Cómo medimos
+            </Link>
+          </p>
         </div>
 
         {/* Gradient decorativo */}
@@ -159,6 +166,11 @@ export default async function Home() {
         </p>
         <p className="mt-1 text-xs opacity-60">
           Los análisis de IA son información referencial. Siempre consulta las fuentes originales.
+        </p>
+        <p className="mt-3 text-xs">
+          <Link href="/como-funciona" className="underline-offset-4 hover:text-foreground hover:underline">
+            Cómo medimos
+          </Link>
         </p>
       </footer>
     </div>

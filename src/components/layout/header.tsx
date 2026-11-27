@@ -41,6 +41,12 @@ export async function Header() {
           <Link href="/temas" className="hover:text-foreground transition-colors">
             Temas Públicos
           </Link>
+          <Link href="/como-funciona" className="hover:text-foreground transition-colors">
+            Cómo funciona
+          </Link>
+          <Link href="/historial" className="hover:text-foreground transition-colors">
+            Historial
+          </Link>
         </nav>
 
         {/* Acciones */}
