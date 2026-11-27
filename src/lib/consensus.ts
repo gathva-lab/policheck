@@ -69,6 +69,8 @@ export interface ConsensusResult {
   partial: boolean;
   usedReports: ModelReport[];
   discardedReports: ModelReport[];
+  // Motivo del descarte por nombre de modelo, para trazabilidad y UI.
+  discardReasons: Record<string, string>;
 }
 
 const POSITIVE_KEYWORDS = [
@@ -122,17 +124,74 @@ function average(values: number[]): number | null {
   return Math.round((values.reduce((acc, v) => acc + v, 0) / values.length) * 100) / 100;
 }
 
+// Coherencia interna: la naturaleza del contenido debe ser compatible con el
+// puntaje y con la etiqueta del veredicto. Devuelve el motivo del descarte o null.
+export function detectInternalInconsistency(report: ModelReport): string | null {
+  const score = report.veracityScore;
+  if (score === null) return null;
+
+  if (report.contentNature === 'mixto' && score < 10) {
+    return 'mixto_con_score_inchequeable';
+  }
+  if (report.contentNature === 'factual' && score < 15) {
+    return 'factual_con_score_bajo';
+  }
+  if (report.contentNature === 'opinion' && score > 75) {
+    return 'opinion_con_score_alto';
+  }
+  if (
+    report.contentNature === 'opinion' &&
+    (report.verdictLabel === 'verdadero' || report.verdictLabel === 'verdadero_pero')
+  ) {
+    return 'opinion_con_veredicto_positivo';
+  }
+  return null;
+}
+
 export function computeConsensus(reports: ModelReport[], minimumValid = 2): ConsensusResult {
   const usedReports: ModelReport[] = [];
   const discardedReports: ModelReport[] = [];
+  const discardReasons: Record<string, string> = {};
 
-  for (const report of reports) {
-    if (report.veracityScore === null || report.verdictLabel === null) continue;
-    if (report.summary && justificationContradictsVerdict(report.verdictLabel, report.summary)) {
-      discardedReports.push(report);
-    } else {
+  const candidates = reports.filter(
+    (report) => report.veracityScore !== null && report.verdictLabel !== null
+  );
+  const inconsistencies = new Map<ModelReport, string>();
+  for (const report of candidates) {
+    const reason = detectInternalInconsistency(report);
+    if (reason) inconsistencies.set(report, reason);
+  }
+  // Si todos los reportes válidos son incoherentes, no se descarta ninguno:
+  // es preferible un consenso imperfecto a quedarse sin ninguna señal.
+  const allInconsistent =
+    candidates.length > 0 && candidates.every((report) => inconsistencies.has(report));
+
+  for (const report of candidates) {
+    if (allInconsistent) {
       usedReports.push(report);
+      continue;
     }
+    const inconsistency = inconsistencies.get(report);
+    if (inconsistency) {
+      discardedReports.push(report);
+      discardReasons[report.modelName] = inconsistency;
+      console.warn(
+        `[consensus] Reporte descartado (${report.modelName}): ${inconsistency}`
+      );
+      continue;
+    }
+    if (
+      report.summary &&
+      report.verdictLabel &&
+      justificationContradictsVerdict(report.verdictLabel, report.summary)
+    ) {
+      const reason = 'justificacion_contradice_veredicto';
+      discardedReports.push(report);
+      discardReasons[report.modelName] = reason;
+      console.warn(`[consensus] Reporte descartado (${report.modelName}): ${reason}`);
+      continue;
+    }
+    usedReports.push(report);
   }
 
   if (usedReports.length < minimumValid) {
@@ -151,6 +210,7 @@ export function computeConsensus(reports: ModelReport[], minimumValid = 2): Cons
       partial: partialLabel !== null,
       usedReports,
       discardedReports,
+      discardReasons,
     };
   }
 
@@ -170,7 +230,7 @@ export function computeConsensus(reports: ModelReport[], minimumValid = 2): Cons
   }
 
   const consensusAgreement = majorityLabel ? Math.round((maxCount / usedReports.length) * 100) : 0;
-  const requiresReview = majorityLabel === null || consensusAgreement < 60;
+  const requiresReview = allInconsistent || majorityLabel === null || consensusAgreement < 60;
 
   return {
     averageVeracity: average(usedReports.map((r) => r.veracityScore as number)),
@@ -183,5 +243,6 @@ export function computeConsensus(reports: ModelReport[], minimumValid = 2): Cons
     partial: false,
     usedReports,
     discardedReports,
+    discardReasons,
   };
 }

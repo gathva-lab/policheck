@@ -9,12 +9,23 @@ const PAGE_SIZE = 1000;
 
 interface CostLogRow {
   model_id: string | null;
+  provider: string | null;
   error_reason: string | null;
   latency_ms: number | null;
 }
 
 interface ModelStats {
   model_id: string;
+  llamadas: number;
+  exitos: number;
+  timeouts: number;
+  otros_errores: number;
+  latencia_media_ms: number | null;
+  tasa_exito: number;
+}
+
+interface ProviderStats {
+  provider: string;
   llamadas: number;
   exitos: number;
   timeouts: number;
@@ -38,15 +49,18 @@ function supabaseAdmin() {
   });
 }
 
-function aggregate(rows: CostLogRow[]): ModelStats[] {
-  const byModel = new Map<string, Accumulator>();
+function aggregateBy(
+  rows: CostLogRow[],
+  keyOf: (row: CostLogRow) => string
+): Array<Accumulator & { key: string }> {
+  const byKey = new Map<string, Accumulator>();
 
   for (const row of rows) {
-    const model = row.model_id?.trim() || 'desconocido';
-    let acc = byModel.get(model);
+    const key = keyOf(row) || 'desconocido';
+    let acc = byKey.get(key);
     if (!acc) {
       acc = { llamadas: 0, exitos: 0, timeouts: 0, otros_errores: 0, latenciaSuma: 0, latenciaCuenta: 0 };
-      byModel.set(model, acc);
+      byKey.set(key, acc);
     }
 
     acc.llamadas += 1;
@@ -64,18 +78,31 @@ function aggregate(rows: CostLogRow[]): ModelStats[] {
     }
   }
 
-  return Array.from(byModel.entries())
-    .map(([model_id, acc]) => ({
-      model_id,
-      llamadas: acc.llamadas,
-      exitos: acc.exitos,
-      timeouts: acc.timeouts,
-      otros_errores: acc.otros_errores,
-      latencia_media_ms:
-        acc.latenciaCuenta > 0 ? Math.round(acc.latenciaSuma / acc.latenciaCuenta) : null,
-      tasa_exito: acc.llamadas > 0 ? Number((acc.exitos / acc.llamadas).toFixed(4)) : 0,
-    }))
+  return Array.from(byKey.entries()).map(([key, acc]) => ({ key, ...acc }));
+}
+
+function statsFields(acc: Accumulator) {
+  return {
+    llamadas: acc.llamadas,
+    exitos: acc.exitos,
+    timeouts: acc.timeouts,
+    otros_errores: acc.otros_errores,
+    latencia_media_ms:
+      acc.latenciaCuenta > 0 ? Math.round(acc.latenciaSuma / acc.latenciaCuenta) : null,
+    tasa_exito: acc.llamadas > 0 ? Number((acc.exitos / acc.llamadas).toFixed(4)) : 0,
+  };
+}
+
+function aggregateModels(rows: CostLogRow[]): ModelStats[] {
+  return aggregateBy(rows, (row) => row.model_id?.trim() || 'desconocido')
+    .map((acc) => ({ model_id: acc.key, ...statsFields(acc) }))
     .sort((a, b) => b.llamadas - a.llamadas || a.model_id.localeCompare(b.model_id));
+}
+
+function aggregateProviders(rows: CostLogRow[]): ProviderStats[] {
+  return aggregateBy(rows, (row) => row.provider?.trim() || 'desconocido')
+    .map((acc) => ({ provider: acc.key, ...statsFields(acc) }))
+    .sort((a, b) => b.llamadas - a.llamadas || a.provider.localeCompare(b.provider));
 }
 
 async function fetchRows(since: string): Promise<CostLogRow[]> {
@@ -85,7 +112,7 @@ async function fetchRows(since: string): Promise<CostLogRow[]> {
   for (;;) {
     const { data, error } = await supabaseAdmin()
       .from('ai_cost_log')
-      .select('model_id, error_reason, latency_ms')
+      .select('model_id, provider, error_reason, latency_ms')
       .gte('created_at', since)
       .order('id', { ascending: true })
       .range(from, from + PAGE_SIZE - 1);
@@ -120,7 +147,8 @@ export async function GET(request: Request) {
     return NextResponse.json({
       window_days: WINDOW_DAYS,
       since,
-      models: aggregate(rows),
+      models: aggregateModels(rows),
+      providers: aggregateProviders(rows),
     });
   } catch (error) {
     console.error('[models-stats] Error:', error);

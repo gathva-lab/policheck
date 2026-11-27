@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { createClient as createAdminClient } from '@supabase/supabase-js';
-import { checkModel, type ModelCheckResult } from '@/lib/ai/openrouter';
+import { checkModel, type ModelCheckResult } from '@/lib/ai/llm';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -56,6 +56,7 @@ export async function POST(request: Request) {
         });
         results.push({
           model_id: row.model_id,
+          provider: 'openrouter',
           ok: false,
           http_status: null,
           latency_ms: 0,
