@@ -7,6 +7,7 @@ import {
   extractDomain,
   isYoutubeUrl,
   MIN_CONTENT_CHARS,
+  NoTranscriptError,
   type ExtractedContent,
 } from '@/lib/ai/extract';
 import { FEVER_SYSTEM_PROMPT } from '@/lib/ai/prompt';
@@ -442,6 +443,19 @@ export async function POST(request: Request) {
         analysis_finished_at: new Date().toISOString(),
       })
       .eq('id', activeSourceId);
+
+    if (error instanceof NoTranscriptError) {
+      return NextResponse.json(
+        {
+          error:
+            'No se pudo obtener la transcripción de este video. YouTube puede estar limitando las peticiones desde nuestro servidor; intenta re-analizar en unos minutos.',
+          source_id: activeSourceId,
+          reason: 'sin_transcripcion',
+        },
+        { status: 422 }
+      );
+    }
+
     return NextResponse.json(
       { error: 'No se pudo acceder o procesar la URL', source_id: activeSourceId },
       { status: 502 }
@@ -468,7 +482,10 @@ export async function POST(request: Request) {
         analysis_finished_at: new Date().toISOString(),
       })
       .eq('id', activeSourceId);
-    return NextResponse.json({ error: errorMessage, source_id: activeSourceId, chars }, { status: 422 });
+    return NextResponse.json(
+      { error: errorMessage, source_id: activeSourceId, chars, reason: 'contenido_insuficiente' },
+      { status: 422 }
+    );
   }
 
   etapa = 'filtro_jev';
@@ -748,6 +765,7 @@ export async function POST(request: Request) {
             source_quality: {
               transcript_used: content.transcriptUsed,
               transcript_words: content.transcriptWords,
+              transcript_method: content.transcriptMethod ?? null,
             },
             _analysis: attemptDiagnostics,
           }
