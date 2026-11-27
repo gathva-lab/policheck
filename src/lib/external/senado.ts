@@ -1,7 +1,9 @@
 // Cliente del padrón público de senadores vigentes del Senado de Chile.
-// El servicio entrega XML en latin-1 con entidades HTML (&aacute;, &ntilde;,
-// &amp;). No se usa una dependencia de parseo XML: se extraen las etiquetas con
-// expresiones regulares, igual que se hace con otros servicios del proyecto.
+// El servicio entrega XML en UTF-8 (sin charset declarado) y puede incluir
+// entidades HTML (&aacute;, &ntilde;, &amp;). Si el texto llega doblemente
+// codificado se repara con repararDobleEncoding. No se usa una dependencia de
+// parseo XML: se extraen las etiquetas con expresiones regulares, igual que se
+// hace con otros servicios del proyecto.
 
 export interface ParlamentarioSenado {
   parlId: string;
@@ -83,6 +85,34 @@ const ENTIDADES: Record<string, string> = {
   deg: '°',
 };
 
+// Casos frecuentes de doble codificación: un texto UTF-8 interpretado como
+// latin-1 deja "Ã" seguido del byte original (p. ej. "Ã¡" en vez de "á").
+const REPARACION_DOBLE_ENCODING: ReadonlyArray<readonly [string, string]> = [
+  ['Ã¡', 'á'],
+  ['Ã©', 'é'],
+  ['Ã\u00ad', 'í'],
+  ['Ã³', 'ó'],
+  ['Ãº', 'ú'],
+  ['Ã±', 'ñ'],
+  ['Ã\u0081', 'Á'],
+  ['Ã\u0089', 'É'],
+  ['Ã\u008d', 'Í'],
+  ['Ã\u0093', 'Ó'],
+  ['Ã\u009a', 'Ú'],
+  ['Ã\u0091', 'Ñ'],
+  ['Â\u00a0', ' '],
+];
+
+// Repara texto que sufrió doble codificación (UTF-8 leído como latin-1).
+// Es idempotente: si el texto ya está correcto no cambia nada.
+export function repararDobleEncoding(texto: string): string {
+  let resultado = texto;
+  for (const [corrupto, correcto] of REPARACION_DOBLE_ENCODING) {
+    resultado = resultado.split(corrupto).join(correcto);
+  }
+  return resultado;
+}
+
 // Decodifica entidades nombradas y numéricas. Las entidades se reemplazan en
 // una sola pasada para que "&amp;aacute;" quede como "&aacute;" y no como "á".
 export function decodificarEntidadesHtml(texto: string): string {
@@ -134,12 +164,12 @@ export function parsearSenadoresXml(xml: string): ParlamentarioSenado[] {
 
     senadores.push({
       parlId,
-      nombre: extraerEtiqueta(bloque[1], 'PARLNOMBRE'),
-      apellidoPaterno: extraerEtiqueta(bloque[1], 'PARLAPELLIDOPATERNO'),
-      apellidoMaterno: extraerEtiqueta(bloque[1], 'PARLAPELLIDOMATERNO'),
-      region: extraerEtiqueta(bloque[1], 'REGION'),
+      nombre: repararDobleEncoding(extraerEtiqueta(bloque[1], 'PARLNOMBRE')),
+      apellidoPaterno: repararDobleEncoding(extraerEtiqueta(bloque[1], 'PARLAPELLIDOPATERNO')),
+      apellidoMaterno: repararDobleEncoding(extraerEtiqueta(bloque[1], 'PARLAPELLIDOMATERNO')),
+      region: repararDobleEncoding(extraerEtiqueta(bloque[1], 'REGION')),
       circunscripcion: extraerEtiqueta(bloque[1], 'CIRCUNSCRIPCION'),
-      partido: extraerEtiqueta(bloque[1], 'PARTIDO'),
+      partido: repararDobleEncoding(extraerEtiqueta(bloque[1], 'PARTIDO')),
       email: textoONulo(extraerEtiqueta(bloque[1], 'EMAIL')),
       curriculum: textoONulo(extraerEtiqueta(bloque[1], 'CURRICULUM')),
     });
@@ -177,9 +207,10 @@ export async function fetchSenadoresVigentes(apiKey?: string): Promise<Parlament
       );
     }
 
-    // El servicio declara latin-1; se decodifica explícitamente para que los
+    // El servicio devuelve application/xml sin charset, y por la especificación
+    // de XML eso significa UTF-8. Se decodifica explícitamente para que los
     // acentos no lleguen rotos antes de procesar las entidades HTML.
-    const xml = new TextDecoder('iso-8859-1').decode(await response.arrayBuffer());
+    const xml = new TextDecoder('utf-8').decode(await response.arrayBuffer());
     return parsearSenadoresXml(xml);
   } catch (error) {
     if (error instanceof Error && error.name === 'AbortError') {

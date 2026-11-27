@@ -50,6 +50,23 @@ function supabaseAdmin() {
   );
 }
 
+// Una "Ã" o "Â" en un nombre delata doble codificación (UTF-8 leído como
+// latin-1), el mismo patrón que corrige repararDobleEncoding al sincronizar.
+const SECUENCIAS_DOBLE_ENCODING = /[ÃÂ]/;
+
+function tieneEncodingSospechoso(fila: FilaParlamentario): boolean {
+  const campos = [
+    fila.nombre,
+    fila.apellido_paterno,
+    fila.apellido_materno,
+    fila.region,
+    fila.partido,
+  ];
+  return campos.some(
+    (campo) => typeof campo === 'string' && SECUENCIAS_DOBLE_ENCODING.test(campo)
+  );
+}
+
 function filaDesdeSenador(senador: ParlamentarioSenado): FilaParlamentario {
   const nombre = nombreCompleto(senador);
   return {
@@ -221,7 +238,13 @@ export async function GET() {
     };
   });
 
-  return NextResponse.json({ ok: true, total: parlamentarios.length, parlamentarios });
+  return NextResponse.json({
+    ok: true,
+    total: parlamentarios.length,
+    conteo: filas.length,
+    encodingSospechoso: filas.some(tieneEncodingSospechoso),
+    parlamentarios,
+  });
 }
 
 export async function PATCH(request: Request) {
