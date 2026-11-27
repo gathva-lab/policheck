@@ -12,6 +12,7 @@ import { displayLabel, colorFromLabel, type VeracityColor } from '@/lib/veracity
 import {
     EXTERNAL_RELATIONS,
     FALLACY_TYPES,
+    median,
     type ContentNature,
     type ExternalRelation,
     type FallacyType,
@@ -48,6 +49,8 @@ interface JevVerification {
 interface SourceVerdict {
     verdict: string | null;
     verdict_score: number | null;
+    mean_score: number | null;
+    nature_override: boolean;
     consensus_agreement: number | null;
     jev_support: number | null;
     requires_review: boolean;
@@ -316,7 +319,7 @@ export function AnalysisResults({ sourceId, politicianId, sourceUrl }: AnalysisR
         const supabase = createClient();
         const [reportsRes, sourceRes] = await Promise.all([
             supabase.from('ai_reports').select('*').eq('source_id', sourceId),
-            supabase.from('sources').select('verdict, verdict_score, consensus_agreement, jev_support, requires_review, status, analysis_error').eq('id', sourceId).maybeSingle(),
+            supabase.from('sources').select('verdict, verdict_score, mean_score, nature_override, consensus_agreement, jev_support, requires_review, status, analysis_error').eq('id', sourceId).maybeSingle(),
         ]);
 
         if (reportsRes.error) {
@@ -328,6 +331,8 @@ export function AnalysisResults({ sourceId, politicianId, sourceUrl }: AnalysisR
             ? {
                 verdict: sourceRes.data.verdict ?? null,
                 verdict_score: sourceRes.data.verdict_score ?? null,
+                mean_score: sourceRes.data.mean_score ?? null,
+                nature_override: sourceRes.data.nature_override === true,
                 consensus_agreement: sourceRes.data.consensus_agreement ?? null,
                 jev_support: sourceRes.data.jev_support ?? null,
                 requires_review: sourceRes.data.requires_review ?? false,
@@ -571,13 +576,38 @@ export function AnalysisResults({ sourceId, politicianId, sourceUrl }: AnalysisR
     const consensusReports = validReports.filter((report) => !getConsensusDiscard(report).discarded);
     const scoredReports = consensusReports.length > 0 ? consensusReports : validReports;
 
-    // Calcular promedios combinados
-    const avgVeracity = Math.round(
-        scoredReports.reduce((acc, r) => acc + (r.veracity_score || 0), 0) / scoredReports.length
-    );
+    // El verdict_score persistido ya es la mediana. Si aún no está disponible,
+    // se calcula en cliente sobre todos los puntajes para no mostrar el promedio.
+    const allScores = validReports.map((report) => report.veracity_score as number);
+    const computedMedian = allScores.length > 0 ? median(allScores) : null;
+    const verdictScoreValue = verdict?.verdict_score ?? computedMedian;
+    const avgVeracity = Math.round(verdictScoreValue ?? 0);
+    const meanScoreValue =
+        verdict?.mean_score ??
+        (scoredReports.length > 0
+            ? scoredReports.reduce((acc, r) => acc + (r.veracity_score || 0), 0) / scoredReports.length
+            : null);
     const avgCoherence = Math.round(
         scoredReports.reduce((acc, r) => acc + (r.coherence_score || 0), 0) / scoredReports.length
     );
+
+    // Un modelo es outlier si se aleja más de 25 puntos de la mediana. Se
+    // incluyen los descartados para que el disidente no quede invisible.
+    let outlierReport: AIReport | null = null;
+    let maxOutlierDistance = 0;
+    if (computedMedian !== null) {
+        for (const report of validReports) {
+            const distance = Math.abs((report.veracity_score as number) - computedMedian);
+            if (distance > maxOutlierDistance) {
+                maxOutlierDistance = distance;
+                outlierReport = report;
+            }
+        }
+    }
+    const outlierDetected =
+        computedMedian !== null &&
+        (maxOutlierDistance > 25 ||
+            (meanScoreValue !== null && Math.abs(computedMedian - meanScoreValue) > 25));
 
     // Obtener un resumen y puntos clave (tomamos el primero válido, idealmente los modelos más potentes suelen venir primero o ultimo)
     const mainSummaryReport = scoredReports.find(r => r.summary);
@@ -697,6 +727,13 @@ export function AnalysisResults({ sourceId, politicianId, sourceUrl }: AnalysisR
                                     Resumen del modelo: <span className="font-medium">{plainSummaryModel}</span>
                                 </p>
                             )}
+                        </div>
+                    )}
+
+                    {verdict?.nature_override && (
+                        <div className="flex items-start gap-2 rounded-xl border border-amber-200 dark:border-amber-800/50 bg-amber-50 dark:bg-amber-950/20 p-4 text-sm text-amber-800 dark:text-amber-300">
+                            <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5" />
+                            <p>El veredicto se fijó en «no evaluable» porque la mayoría de los modelos clasificó el contenido como opinión, no como afirmaciones verificables.</p>
                         </div>
                     )}
 
@@ -914,6 +951,16 @@ export function AnalysisResults({ sourceId, politicianId, sourceUrl }: AnalysisR
 
             {/* Detalles por Modelo */}
             <div className="pt-2">
+                {outlierDetected && outlierReport && computedMedian !== null && (
+                    <p className="mb-3 flex items-start gap-2 text-sm text-amber-700 dark:text-amber-300">
+                        <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5" />
+                        <span>
+                            Un modelo difirió del resto: <strong>{outlierReport.model_name}</strong>{' '}
+                            puntuó {(outlierReport.veracity_score as number)} frente a una mediana de{' '}
+                            {computedMedian}.
+                        </span>
+                    </p>
+                )}
                 <Accordion type="single" collapsible className="w-full bg-slate-50 dark:bg-slate-900/30 rounded-xl border px-5">
                     {validReports.map((report, index) => {
                         const discard = getConsensusDiscard(report);
