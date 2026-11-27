@@ -245,6 +245,12 @@ function readPlainContent(report: AIReport): PlainContent {
     };
 }
 
+const SCORE_CITATION_PATTERN = /\b\d{2}\b[\s\S]*?(puntaje|veracidad|coherencia|claridad)/i;
+
+export function summaryCitesScores(text: string): boolean {
+    return SCORE_CITATION_PATTERN.test(text);
+}
+
 function TechnicalFallacies({ report }: { report: AIReport }) {
     const fallacies = readPlainContent(report).fallacies;
     if (!fallacies || fallacies.length === 0) return null;
@@ -551,20 +557,31 @@ export function AnalysisResults({ sourceId, politicianId, sourceUrl }: AnalysisR
     );
 
     // Obtener un resumen y puntos clave (tomamos el primero válido, idealmente los modelos más potentes suelen venir primero o ultimo)
-    const mainSummary = validReports.find(r => r.summary)?.summary;
+    const mainSummaryReport = validReports.find(r => r.summary);
+    const mainSummary = mainSummaryReport?.summary;
     const keyClaims = validReports.find(r => r.key_claims && Array.isArray(r.key_claims) && r.key_claims.length > 0)?.key_claims || [];
 
     // Contenido en lenguaje ciudadano: se toma el primer reporte que lo traiga.
-    const plainContent = validReports
-        .map(readPlainContent)
+    const plainEntry = validReports
+        .map((report) => ({ report, plain: readPlainContent(report) }))
         .find(
-            (plain) =>
+            ({ plain }) =>
                 plain.plainVerdict ||
                 plain.plainSummary ||
                 plain.contentNature ||
                 (plain.quotes && plain.quotes.length > 0) ||
                 (plain.fallacies && plain.fallacies.length > 0)
-        ) ?? EMPTY_PLAIN_CONTENT;
+        );
+    const plainContent = plainEntry?.plain ?? EMPTY_PLAIN_CONTENT;
+    const plainSummaryReport = plainEntry?.report ?? null;
+    // Defensa ante respuestas antiguas: si el resumen cita cifras de puntaje,
+    // se muestra el resumen técnico de ese mismo modelo en su lugar.
+    const plainSummaryText = plainContent.plainSummary
+        ? summaryCitesScores(plainContent.plainSummary)
+            ? plainSummaryReport?.summary ?? mainSummary ?? null
+            : plainContent.plainSummary
+        : null;
+    const plainSummaryModel = plainSummaryReport?.model_name ?? null;
 
     // Alertas de sesgo relevantes (filtramos las nulas y vacías, o donde dice "no se detecta gran sesgo")
     const biases = validReports.map(r => r.bias_analysis).filter(b => b && b.length > 20) as string[];
@@ -647,10 +664,17 @@ export function AnalysisResults({ sourceId, politicianId, sourceUrl }: AnalysisR
                         </div>
                     </div>
 
-                    {plainContent.plainSummary && (
-                        <p className="text-base leading-relaxed text-slate-700 dark:text-slate-300">
-                            {plainContent.plainSummary}
-                        </p>
+                    {plainSummaryText && (
+                        <div className="space-y-1">
+                            <p className="text-base leading-relaxed text-slate-700 dark:text-slate-300">
+                                {plainSummaryText}
+                            </p>
+                            {plainSummaryModel && (
+                                <p className="text-xs text-slate-500 dark:text-slate-500">
+                                    Resumen del modelo: <span className="font-medium">{plainSummaryModel}</span>
+                                </p>
+                            )}
+                        </div>
                     )}
 
                     {plainContent.contentNature === 'opinion' && (
@@ -842,6 +866,11 @@ export function AnalysisResults({ sourceId, politicianId, sourceUrl }: AnalysisR
                     <div className="bg-slate-50 dark:bg-slate-900/50 p-4 rounded-xl border">
                         <h5 className="font-bold text-xs uppercase tracking-wider text-muted-foreground mb-2">Síntesis</h5>
                         <p className="text-sm leading-relaxed text-slate-700 dark:text-slate-300">{mainSummary}</p>
+                        {mainSummaryReport && (
+                            <p className="mt-2 text-xs text-slate-500 dark:text-slate-500">
+                                Resumen del modelo: <span className="font-medium">{mainSummaryReport.model_name}</span>
+                            </p>
+                        )}
                     </div>
                 )}
 
