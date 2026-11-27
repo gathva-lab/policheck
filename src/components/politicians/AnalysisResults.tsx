@@ -64,6 +64,13 @@ interface AnalysisDiagnostics {
     timeouts: number;
 }
 
+interface SourceQuality {
+    transcriptUsed: boolean | null;
+    transcriptWords: number | null;
+    transcriptMethod: string | null;
+    fromCache: boolean;
+}
+
 interface AnalysisResultsProps {
     sourceId: string;
     politicianId: string;
@@ -122,6 +129,24 @@ function getAnalysisDiagnostics(reports: AIReport[]): AnalysisDiagnostics | null
             modelsAttempted,
             modelsResponded,
             timeouts: Number.isFinite(timeouts) ? timeouts : 0,
+        };
+    }
+    return null;
+}
+
+function getSourceQuality(reports: AIReport[]): SourceQuality | null {
+    for (const report of reports) {
+        const raw = report.report_json;
+        if (!raw || typeof raw !== 'object') continue;
+        const quality = (raw as { source_quality?: unknown }).source_quality;
+        if (!quality || typeof quality !== 'object') continue;
+        const obj = quality as Record<string, unknown>;
+        const transcriptWords = Number(obj.transcript_words);
+        return {
+            transcriptUsed: typeof obj.transcript_used === 'boolean' ? obj.transcript_used : null,
+            transcriptWords: Number.isFinite(transcriptWords) ? transcriptWords : null,
+            transcriptMethod: typeof obj.transcript_method === 'string' ? obj.transcript_method : null,
+            fromCache: obj.transcript_source === 'cache',
         };
     }
     return null;
@@ -313,7 +338,9 @@ export function AnalysisResults({ sourceId, politicianId, sourceUrl }: AnalysisR
     const [loading, setLoading] = useState(true);
     const [timedOut, setTimedOut] = useState(false);
     const [reanalyzing, setReanalyzing] = useState(false);
+    const [retryingTranscript, setRetryingTranscript] = useState(false);
     const [error, setError] = useState<string | null>(null);
+    const [transcriptError, setTranscriptError] = useState<{ message: string; retryable: boolean } | null>(null);
 
     const fetchReports = useCallback(async () => {
         const supabase = createClient();
@@ -407,15 +434,26 @@ export function AnalysisResults({ sourceId, politicianId, sourceUrl }: AnalysisR
     const handleReanalyze = async () => {
         setReanalyzing(true);
         setError(null);
+        setTranscriptError(null);
         try {
             const res = await fetch('/api/analyze', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ url: sourceUrl, politicianId, force: true }),
             });
-            const data = await res.json().catch(() => null);
+            const data = (await res.json().catch(() => null)) as {
+                error?: string;
+                reason?: string;
+                retryable?: boolean;
+            } | null;
             if (!res.ok) {
                 setError(data?.error ?? 'No se pudo re-analizar la fuente.');
+                if (data?.reason === 'sin_transcripcion' && data?.retryable === true) {
+                    setTranscriptError({
+                        message: data.error ?? 'YouTube está limitando las peticiones. Vuelve a intentarlo en unos minutos.',
+                        retryable: true,
+                    });
+                }
                 return;
             }
             await fetchReports();
@@ -427,6 +465,52 @@ export function AnalysisResults({ sourceId, politicianId, sourceUrl }: AnalysisR
             setReanalyzing(false);
         }
     };
+
+    const handleRetryTranscript = async () => {
+        setRetryingTranscript(true);
+        setError(null);
+        try {
+            const res = await fetch(`/api/sources/${sourceId}/transcript`, { method: 'POST' });
+            const data = (await res.json().catch(() => null)) as {
+                ok?: boolean;
+                reason?: string;
+                retryable?: boolean;
+            } | null;
+            if (!res.ok || !data?.ok) {
+                setTranscriptError({
+                    message: data?.reason ?? 'No se pudo re-extraer la transcripción.',
+                    retryable: data?.retryable !== false,
+                });
+                return;
+            }
+            setTranscriptError(null);
+        } catch {
+            setTranscriptError({
+                message: 'No se pudo re-extraer la transcripción.',
+                retryable: true,
+            });
+        } finally {
+            setRetryingTranscript(false);
+        }
+    };
+
+    const transcriptErrorBanner = transcriptError ? (
+        <div className="mt-3 rounded-xl border border-amber-200 dark:border-amber-800/50 bg-amber-50 dark:bg-amber-950/20 p-4 space-y-3">
+            <p className="text-sm text-amber-800 dark:text-amber-300">{transcriptError.message}</p>
+            {transcriptError.retryable && (
+                <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={handleRetryTranscript}
+                    disabled={retryingTranscript}
+                >
+                    <RefreshCw className={retryingTranscript ? 'animate-spin' : ''} />
+                    {retryingTranscript ? 'Reintentando...' : 'Reintentar'}
+                </Button>
+            )}
+        </div>
+    ) : null;
 
     const verdictColor = colorFromLabel(verdict?.verdict ?? null);
 
@@ -494,6 +578,7 @@ export function AnalysisResults({ sourceId, politicianId, sourceUrl }: AnalysisR
                         </p>
                     )}
                     {error && <p className="text-sm text-red-600 dark:text-red-400">{error}</p>}
+                    {transcriptErrorBanner}
                 </div>
             );
         }
@@ -542,6 +627,7 @@ export function AnalysisResults({ sourceId, politicianId, sourceUrl }: AnalysisR
                     </p>
 
                     {error && <p className="text-sm text-red-600 dark:text-red-400">{error}</p>}
+                    {transcriptErrorBanner}
 
                     <ReanalyzeButton onClick={handleReanalyze} loading={reanalyzing} />
                 </div>
@@ -555,6 +641,7 @@ export function AnalysisResults({ sourceId, politicianId, sourceUrl }: AnalysisR
                     <p className="text-sm">No se pudo completar el análisis. Intenta re-analizar.</p>
                 </div>
                 {error && <p className="text-sm text-red-600 dark:text-red-400">{error}</p>}
+                    {transcriptErrorBanner}
                 <ReanalyzeButton onClick={handleReanalyze} loading={reanalyzing} />
             </div>
         );
@@ -674,6 +761,7 @@ export function AnalysisResults({ sourceId, politicianId, sourceUrl }: AnalysisR
         const quality = (raw as { source_quality?: { transcript_used?: unknown } }).source_quality;
         return quality?.transcript_used === false;
     });
+    const sourceQuality = getSourceQuality(reports);
 
     const getScoreColor = (score: number) => {
         if (score >= 70) return "bg-emerald-500";
@@ -699,6 +787,7 @@ export function AnalysisResults({ sourceId, politicianId, sourceUrl }: AnalysisR
             )}
 
             {error && <p className="text-sm text-red-600 dark:text-red-400">{error}</p>}
+                    {transcriptErrorBanner}
 
             {/* Veredicto en lenguaje ciudadano */}
             {(plainContent.plainVerdict || plainContent.plainSummary || plainContent.contentNature === 'opinion' || plainContent.quotes) && (
@@ -991,6 +1080,20 @@ export function AnalysisResults({ sourceId, politicianId, sourceUrl }: AnalysisR
                                         </p>
                                         {discard.reason && (
                                             <p className="mt-1 text-xs opacity-80">Motivo: {discard.reason}</p>
+                                        )}
+                                    </div>
+                                )}
+                                {sourceQuality && (sourceQuality.transcriptMethod || sourceQuality.transcriptWords !== null || sourceQuality.fromCache) && (
+                                    <div>
+                                        <strong className="text-xs uppercase tracking-wider text-slate-500 dark:text-slate-500 block mb-1">Transcripción</strong>
+                                        <p className="leading-relaxed">
+                                            Método: {sourceQuality.fromCache ? 'cache' : sourceQuality.transcriptMethod ?? 'no disponible'}
+                                            {sourceQuality.transcriptWords !== null ? ` · ${sourceQuality.transcriptWords} palabras` : ''}
+                                        </p>
+                                        {sourceQuality.fromCache && (
+                                            <p className="mt-1 text-xs text-slate-500 dark:text-slate-500">
+                                                Transcripción reutilizada del primer análisis.
+                                            </p>
                                         )}
                                     </div>
                                 )}

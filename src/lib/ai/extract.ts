@@ -9,6 +9,9 @@ export const CAPTION_TRACKS_TIMEOUT_MS = 12000;
 export const YOUTUBE_EXTRACTION_BUDGET_MS = 65000;
 export const ARTICLE_EXTRACTION_BUDGET_MS = 20000;
 export const MIN_CONTENT_CHARS = 200;
+// Espera exponencial entre reintentos completos de extracción. Solo se aplica
+// cuando el fallo es transitorio (red o bloqueo de YouTube).
+export const TRANSCRIPT_RETRY_DELAYS_MS = [500, 1500] as const;
 
 const BROWSER_USER_AGENT =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36';
@@ -23,6 +26,9 @@ export interface ExtractedContent {
   transcriptUsed: boolean;
   transcriptWords: number;
   transcriptMethod: TranscriptMethod | null;
+  // Transcripción completa sin combinar con la descripción. Se guarda en
+  // sources.transcript_text para reutilizarla en los re-análisis.
+  transcriptText?: string;
 }
 
 export interface CaptionTrack {
@@ -31,10 +37,19 @@ export interface CaptionTrack {
 }
 
 export class NoTranscriptError extends Error {
-  constructor(message: string) {
+  // true cuando el fallo es transitorio (red o límite de YouTube) y conviene
+  // reintentar; false cuando el video simplemente no tiene texto disponible.
+  readonly retryable: boolean;
+
+  constructor(message: string, retryable = false) {
     super(message);
     this.name = 'NoTranscriptError';
+    this.retryable = retryable;
   }
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 export function isYoutubeUrl(url: string): boolean {
@@ -255,8 +270,14 @@ export async function extractArticle(url: string): Promise<ExtractedContent> {
   return withTimeout(extractArticleInner(url), ARTICLE_EXTRACTION_BUDGET_MS, 'extraccion_timeout');
 }
 
-async function extractYoutubeInner(url: string): Promise<ExtractedContent> {
+interface YoutubeAttemptResult {
+  content: ExtractedContent | null;
+  error: NoTranscriptError | null;
+}
+
+async function extractYoutubeAttempt(url: string): Promise<YoutubeAttemptResult> {
   let title = 'Video de YouTube';
+  let titleObtained = false;
   let description = '';
 
   try {
@@ -266,7 +287,10 @@ async function extractYoutubeInner(url: string): Promise<ExtractedContent> {
     });
     if (oembed.ok) {
       const data = (await oembed.json()) as { title?: string };
-      if (data.title) title = data.title.trim();
+      if (data.title && data.title.trim()) {
+        title = data.title.trim();
+        titleObtained = true;
+      }
     }
   } catch {
     // No bloqueante
@@ -275,12 +299,24 @@ async function extractYoutubeInner(url: string): Promise<ExtractedContent> {
   const videoId = youtubeVideoId(url);
   const watchUrl = videoId ? `https://www.youtube.com/watch?v=${videoId}` : url;
   const pageHtml = await fetchYoutubePage(watchUrl);
+  const pageLoaded = pageHtml !== null;
+  let captionTracksPresent = false;
+
   if (pageHtml) {
     const $ = cheerio.load(pageHtml);
     description =
       $('meta[name="description"]').attr('content')?.trim() ||
       $('meta[property="og:description"]').attr('content')?.trim() ||
       '';
+    captionTracksPresent = parseCaptionTracks(pageHtml).length > 0;
+    if (!titleObtained) {
+      const pageTitle =
+        $('meta[property="og:title"]').attr('content')?.trim() || $('title').first().text().trim();
+      if (pageTitle) {
+        title = pageTitle;
+        titleObtained = true;
+      }
+    }
   }
 
   let transcript = await fetchTranscript(url);
@@ -299,29 +335,86 @@ async function extractYoutubeInner(url: string): Promise<ExtractedContent> {
 
   if (transcriptMethod) {
     console.log(`[extract] transcripción vía ${transcriptMethod}`);
-  } else {
-    console.warn(`[extract] Sin transcripción para ${url}, se analiza solo la descripción`);
-    if (description.trim().length < MIN_CONTENT_CHARS) {
-      throw new NoTranscriptError(
-        'No se pudo obtener la transcripción del video. YouTube puede estar limitando las peticiones; intenta de nuevo en unos minutos.'
-      );
-    }
+    const transcriptText = transcript.trim();
+    const combined = [description, transcriptText].filter(Boolean).join('\n\n');
+    return {
+      content: {
+        title,
+        text: truncateToTokens(combined || `Video de YouTube: ${title}`),
+        sourceType: 'video_youtube',
+        transcriptUsed: true,
+        transcriptWords: transcriptText.split(/\s+/).length,
+        transcriptMethod,
+        transcriptText,
+      },
+      error: null,
+    };
   }
 
-  const transcriptUsed = transcriptMethod !== null;
-  const transcriptWords = transcriptUsed ? transcript.trim().split(/\s+/).length : 0;
+  console.warn(`[extract] Sin transcripción para ${url}, se analiza solo la descripción`);
+  if (description.trim().length >= MIN_CONTENT_CHARS) {
+    return {
+      content: {
+        title,
+        text: truncateToTokens(description),
+        sourceType: 'video_youtube',
+        transcriptUsed: false,
+        transcriptWords: 0,
+        transcriptMethod: null,
+      },
+      error: null,
+    };
+  }
 
-  const combined = [description, transcript].filter(Boolean).join('\n\n');
+  // Bloqueo: el HTML no trae captionTracks, no hay descripción y el título sí se
+  // obtuvo. También se considera transitorio si la página no cargó o si había
+  // pistas de subtítulos pero falló su descarga.
+  const blocked =
+    (!captionTracksPresent && description.trim().length === 0 && titleObtained) ||
+    !pageLoaded ||
+    captionTracksPresent;
+  if (blocked) {
+    return {
+      content: null,
+      error: new NoTranscriptError(
+        'YouTube está limitando las peticiones desde este servidor. Vuelve a intentarlo en unos minutos.',
+        true
+      ),
+    };
+  }
+
   return {
-    title,
-    text: truncateToTokens(combined || `Video de YouTube: ${title}`),
-    sourceType: 'video_youtube',
-    transcriptUsed,
-    transcriptWords,
-    transcriptMethod,
+    content: null,
+    error: new NoTranscriptError(
+      'Este video no tiene subtítulos ni descripción con texto suficiente.',
+      false
+    ),
   };
 }
 
+async function extractYoutubeWithRetries(url: string): Promise<ExtractedContent> {
+  for (let attempt = 0; ; attempt += 1) {
+    const result = await extractYoutubeAttempt(url);
+    if (result.content) return result.content;
+
+    const error =
+      result.error ??
+      new NoTranscriptError(
+        'Este video no tiene subtítulos ni descripción con texto suficiente.',
+        false
+      );
+    if (error.retryable && attempt < TRANSCRIPT_RETRY_DELAYS_MS.length) {
+      await delay(TRANSCRIPT_RETRY_DELAYS_MS[attempt]);
+      continue;
+    }
+    throw error;
+  }
+}
+
 export async function extractYoutube(url: string): Promise<ExtractedContent> {
-  return withTimeout(extractYoutubeInner(url), YOUTUBE_EXTRACTION_BUDGET_MS, 'extraccion_timeout');
+  return withTimeout(
+    extractYoutubeWithRetries(url),
+    YOUTUBE_EXTRACTION_BUDGET_MS,
+    'extraccion_timeout'
+  );
 }

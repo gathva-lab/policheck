@@ -78,6 +78,7 @@ vi.mock('@/lib/ai/extract', () => ({
   extractDomain: () => 'ejemplo.cl',
   isYoutubeUrl: () => false,
   MIN_CONTENT_CHARS: 200,
+  truncateToTokens: (text: string) => text,
 }));
 
 vi.mock('@/lib/ai/llm', () => ({

@@ -22,6 +22,7 @@ const h = vi.hoisted(() => {
     { id: 'tencent', model_id: 'tencent/hy4-flash', tier: 'eco', is_active: true, priority: 10, fallback_id: null },
   ];
   let modelConfigs = defaultModels;
+  let existingSource: Record<string, unknown> | null = null;
 
   function result(table: string, methods: string[]): unknown {
     const has = (method: string) => methods.includes(method);
@@ -31,7 +32,7 @@ const h = vi.hoisted(() => {
       }
       if (has('update')) return { data: { id: 'source-1' }, error: null };
       if (has('gte')) return { count: 0, error: null };
-      return { data: null, error: null };
+      return { data: existingSource, error: null };
     }
     if (table === 'media_outlets') return { data: { id: 'outlet-1' }, error: null };
     if (table === 'ai_model_config') {
@@ -60,9 +61,12 @@ const h = vi.hoisted(() => {
   }
 
   class MockNoTranscriptError extends Error {
-    constructor(message: string) {
+    readonly retryable: boolean;
+
+    constructor(message: string, retryable = false) {
       super(message);
       this.name = 'NoTranscriptError';
+      this.retryable = retryable;
     }
   }
 
@@ -75,6 +79,12 @@ const h = vi.hoisted(() => {
     },
     resetModelConfigs: () => {
       modelConfigs = defaultModels;
+    },
+    setExistingSource: (row: Record<string, unknown> | null) => {
+      existingSource = row;
+    },
+    resetExistingSource: () => {
+      existingSource = null;
     },
     NoTranscriptError: MockNoTranscriptError,
     extractArticle: vi.fn(),
@@ -105,6 +115,7 @@ vi.mock('@/lib/ai/extract', () => ({
   isYoutubeUrl: h.isYoutubeUrl,
   NoTranscriptError: h.NoTranscriptError,
   MIN_CONTENT_CHARS: 200,
+  truncateToTokens: (text: string) => text,
 }));
 
 vi.mock('@/lib/ai/llm', () => ({
@@ -125,6 +136,7 @@ vi.mock('@/lib/ai/jev', async (importOriginal) => {
 
 beforeEach(() => {
   h.resetModelConfigs();
+  h.resetExistingSource();
   h.inserts.length = 0;
   h.updates.length = 0;
   h.jevConsensus.mockReset();
@@ -195,7 +207,8 @@ describe('/api/analyze transcripción ausente', () => {
     h.extractArticle.mockReset();
     h.extractYoutube.mockRejectedValue(
       new h.NoTranscriptError(
-        'No se pudo obtener la transcripción del video. YouTube puede estar limitando las peticiones; intenta de nuevo en unos minutos.'
+        'YouTube está limitando las peticiones desde este servidor. Vuelve a intentarlo en unos minutos.',
+        true
       )
     );
 
@@ -210,14 +223,55 @@ describe('/api/analyze transcripción ausente', () => {
     });
 
     const response = await POST(request);
-    const json = (await response.json()) as { error?: string; source_id?: string; reason?: string };
+    const json = (await response.json()) as {
+      error?: string;
+      source_id?: string;
+      reason?: string;
+      retryable?: boolean;
+    };
 
     expect(response.status).toBe(422);
     expect(json.source_id).toBe('source-1');
     expect(json.reason).toBe('sin_transcripcion');
-    expect(json.error).toContain('No se pudo obtener la transcripción de este video');
+    expect(json.error).toContain('YouTube está limitando las peticiones');
+    expect(json.retryable).toBe(true);
     expect(h.isVerifiable).not.toHaveBeenCalled();
     expect(h.callModel).not.toHaveBeenCalled();
+  });
+
+  it('no marca retryable cuando el video no tiene subtítulos ni descripción', async () => {
+    process.env.OPENROUTER_API_KEY = 'test-key';
+    process.env.SUPABASE_SERVICE_ROLE_KEY = 'test-service-role';
+    process.env.NEXT_PUBLIC_SUPABASE_URL = 'https://supabase.test';
+
+    h.updates.length = 0;
+    h.callModel.mockReset();
+    h.isVerifiable.mockReset();
+    h.extractYoutube.mockReset();
+    h.extractYoutube.mockRejectedValue(
+      new h.NoTranscriptError(
+        'Este video no tiene subtítulos ni descripción con texto suficiente.',
+        false
+      )
+    );
+
+    const { POST } = await import('@/app/api/analyze/route');
+    const request = new Request('http://localhost/api/analyze', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        url: 'https://www.youtube.com/watch?v=JgvC9xaUKN8',
+        politicianId: 'politico-1',
+      }),
+    });
+
+    const response = await POST(request);
+    const json = (await response.json()) as { reason?: string; retryable?: boolean; error?: string };
+
+    expect(response.status).toBe(422);
+    expect(json.reason).toBe('sin_transcripcion');
+    expect(json.retryable).toBe(false);
+    expect(json.error).toBe('Este video no tiene subtítulos ni descripción con texto suficiente.');
   });
 });
 
@@ -791,5 +845,165 @@ describe('/api/analyze cortacircuitos de timeout', () => {
       .map((insert) => insert.values)
       .filter((values) => values.error_reason === 'timeout');
     expect(timeoutRows).toHaveLength(1);
+  });
+});
+
+describe('/api/analyze caché de transcripción', () => {
+  const cachedText = 'texto cacheado del primer análisis '.repeat(12);
+
+  function prepareModels() {
+    h.callModel.mockReset();
+    h.isVerifiable.mockReset();
+    h.jevConsensus.mockReset();
+    h.extractYoutube.mockReset();
+    h.isVerifiable.mockResolvedValue(null);
+    h.jevConsensus.mockResolvedValue(null);
+    h.callModel.mockImplementation(async (modelId: string) => ({
+      model: modelId,
+      content:
+        '{"verdict_label":"discutible","veracity_score":65,"coherence_score":70,"summary":"ok"}',
+      inputTokens: 20,
+      outputTokens: 10,
+      latencyMs: 5,
+    }));
+  }
+
+  it('reutiliza transcript_text y no llama a YouTube al re-analizar con force', async () => {
+    process.env.OPENROUTER_API_KEY = 'test-key';
+    process.env.SUPABASE_SERVICE_ROLE_KEY = 'test-service-role';
+    process.env.NEXT_PUBLIC_SUPABASE_URL = 'https://supabase.test';
+
+    h.inserts.length = 0;
+    h.updates.length = 0;
+    prepareModels();
+    h.setExistingSource({
+      id: 'source-1',
+      url: 'https://www.youtube.com/watch?v=abc',
+      title: 'Video cacheado',
+      status: 'verificada',
+      transcript_text: cachedText,
+      transcript_method: 'caption-tracks',
+      transcript_words: 72,
+    });
+
+    const { POST } = await import('@/app/api/analyze/route');
+    const request = new Request('http://localhost/api/analyze', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        url: 'https://www.youtube.com/watch?v=abc',
+        politicianId: 'politico-1',
+        force: true,
+      }),
+    });
+
+    const response = await POST(request);
+    expect(response.status).toBe(200);
+    expect(h.extractYoutube).not.toHaveBeenCalled();
+
+    const reportRows = h.inserts
+      .filter((insert) => insert.table === 'ai_reports')
+      .map((insert) => insert.values);
+    const quality = (reportRows[0] as {
+      report_json?: { source_quality?: Record<string, unknown> };
+    }).report_json?.source_quality;
+    expect(quality?.transcript_source).toBe('cache');
+    expect(quality?.transcript_method).toBe('caption-tracks');
+    expect(quality?.transcript_words).toBe(72);
+
+    const transcriptUpdates = h.updates.filter(
+      (update) => update.table === 'sources' && 'transcript_text' in update.values
+    );
+    expect(transcriptUpdates).toHaveLength(0);
+  });
+
+  it('persiste transcript_text, method y words en el primer análisis', async () => {
+    process.env.OPENROUTER_API_KEY = 'test-key';
+    process.env.SUPABASE_SERVICE_ROLE_KEY = 'test-service-role';
+    process.env.NEXT_PUBLIC_SUPABASE_URL = 'https://supabase.test';
+
+    h.inserts.length = 0;
+    h.updates.length = 0;
+    prepareModels();
+    const transcriptText = 'contenido transcrito del video '.repeat(10).trim();
+    h.extractYoutube.mockResolvedValue({
+      title: 'Video',
+      text: transcriptText,
+      sourceType: 'video_youtube',
+      transcriptUsed: true,
+      transcriptWords: 40,
+      transcriptMethod: 'caption-tracks',
+      transcriptText,
+    });
+
+    const { POST } = await import('@/app/api/analyze/route');
+    const request = new Request('http://localhost/api/analyze', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        url: 'https://www.youtube.com/watch?v=abc',
+        politicianId: 'politico-1',
+      }),
+    });
+
+    await POST(request);
+
+    const persisted = h.updates.find(
+      (update) => update.table === 'sources' && 'transcript_text' in update.values
+    );
+    expect(persisted?.values.transcript_text).toBe(transcriptText);
+    expect(persisted?.values.transcript_method).toBe('caption-tracks');
+    expect(persisted?.values.transcript_words).toBe(40);
+    expect(typeof persisted?.values.transcript_fetched_at).toBe('string');
+  });
+
+  it('refetchTranscript re-extrae y reemplaza la transcripción guardada', async () => {
+    process.env.OPENROUTER_API_KEY = 'test-key';
+    process.env.SUPABASE_SERVICE_ROLE_KEY = 'test-service-role';
+    process.env.NEXT_PUBLIC_SUPABASE_URL = 'https://supabase.test';
+
+    h.inserts.length = 0;
+    h.updates.length = 0;
+    prepareModels();
+    h.setExistingSource({
+      id: 'source-1',
+      url: 'https://www.youtube.com/watch?v=abc',
+      title: 'Video cacheado',
+      status: 'verificada',
+      transcript_text: cachedText,
+      transcript_method: 'caption-tracks',
+      transcript_words: 72,
+    });
+    const freshTranscript = 'transcripción nueva pedida a YouTube '.repeat(8).trim();
+    h.extractYoutube.mockResolvedValue({
+      title: 'Video cacheado',
+      text: freshTranscript,
+      sourceType: 'video_youtube',
+      transcriptUsed: true,
+      transcriptWords: 40,
+      transcriptMethod: 'youtube-transcript',
+      transcriptText: freshTranscript,
+    });
+
+    const { POST } = await import('@/app/api/analyze/route');
+    const request = new Request('http://localhost/api/analyze', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        url: 'https://www.youtube.com/watch?v=abc',
+        politicianId: 'politico-1',
+        force: true,
+        refetchTranscript: true,
+      }),
+    });
+
+    await POST(request);
+
+    expect(h.extractYoutube).toHaveBeenCalledTimes(1);
+    const persisted = h.updates.find(
+      (update) => update.table === 'sources' && 'transcript_text' in update.values
+    );
+    expect(persisted?.values.transcript_text).toBe(freshTranscript);
+    expect(persisted?.values.transcript_method).toBe('youtube-transcript');
   });
 });
