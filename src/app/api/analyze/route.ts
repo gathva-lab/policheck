@@ -634,6 +634,7 @@ export async function POST(request: Request) {
             plain_verdict: s.parsed.report?.plainVerdict ?? null,
             plain_summary: s.parsed.report?.plainSummary ?? null,
             quotes: s.parsed.report?.quotes ?? null,
+            fallacies: s.parsed.report?.fallacies ?? null,
             content_nature: s.parsed.report?.contentNature ?? null,
             source_quality: {
               transcript_used: content.transcriptUsed,

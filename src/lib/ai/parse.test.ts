@@ -60,3 +60,149 @@ describe('parseModelOutput: campos en lenguaje ciudadano', () => {
     expect(report?.contentNature).toBeNull();
   });
 });
+
+describe('parseModelOutput: falacias retóricas', () => {
+  it('extrae fallacias válidas del catálogo', () => {
+    const content = JSON.stringify({
+      verdict_label: 'verdadero',
+      veracity_score: 90,
+      coherence_score: 85,
+      summary: 'Resumen',
+      fallacies: [
+        {
+          type: 'asociacion',
+          quote: 'Está vinculado a ese grupo',
+          explanation: 'Se descalifica por un vínculo que no se prueba.',
+        },
+        {
+          type: 'cherry_picking',
+          quote: 'Solo muestran ese dato',
+          explanation: 'Se eligen solo los datos que convienen a la tesis.',
+        },
+      ],
+    });
+
+    const { report } = parseModelOutput('modelo/test', content);
+
+    expect(report?.fallacies).toEqual([
+      {
+        type: 'asociacion',
+        quote: 'Está vinculado a ese grupo',
+        explanation: 'Se descalifica por un vínculo que no se prueba.',
+      },
+      {
+        type: 'cherry_picking',
+        quote: 'Solo muestran ese dato',
+        explanation: 'Se eligen solo los datos que convienen a la tesis.',
+      },
+    ]);
+  });
+
+  it('descarta los tipos desconocidos sin romper el resto', () => {
+    const content = JSON.stringify({
+      verdict_label: 'discutible',
+      veracity_score: 65,
+      coherence_score: 60,
+      summary: 'Resumen',
+      fallacies: [
+        {
+          type: 'ad_hominem',
+          quote: 'Frase con tipo fuera del catálogo',
+          explanation: 'Este elemento debe descartarse.',
+        },
+        {
+          type: 'falsa_dicotomia',
+          quote: 'O estás conmigo o contra mí',
+          explanation: 'Presenta solo dos opciones cuando hay más.',
+        },
+      ],
+    });
+
+    const { report } = parseModelOutput('modelo/test', content);
+
+    expect(report?.fallacies).toEqual([
+      {
+        type: 'falsa_dicotomia',
+        quote: 'O estás conmigo o contra mí',
+        explanation: 'Presenta solo dos opciones cuando hay más.',
+      },
+    ]);
+  });
+
+  it('devuelve null cuando el campo fallacies está ausente', () => {
+    const content = JSON.stringify({
+      verdict_label: 'verdadero',
+      veracity_score: 90,
+      coherence_score: 85,
+      summary: 'Resumen',
+    });
+
+    const { report } = parseModelOutput('modelo/test', content);
+
+    expect(report?.fallacies).toBeNull();
+  });
+
+  it('devuelve null cuando fallacies es un arreglo vacío', () => {
+    const content = JSON.stringify({
+      verdict_label: 'verdadero',
+      veracity_score: 90,
+      coherence_score: 85,
+      summary: 'Resumen',
+      fallacies: [],
+    });
+
+    const { report } = parseModelOutput('modelo/test', content);
+
+    expect(report?.fallacies).toBeNull();
+  });
+
+  it('tolera fallacies malformadas o con elementos incompletos', () => {
+    const content = JSON.stringify({
+      verdict_label: 'verdadero',
+      veracity_score: 90,
+      coherence_score: 85,
+      summary: 'Resumen',
+      fallacies: 'no es un arreglo',
+    });
+
+    expect(parseModelOutput('modelo/test', content).report?.fallacies).toBeNull();
+
+    const conElementosInvalidos = JSON.stringify({
+      verdict_label: 'verdadero',
+      veracity_score: 90,
+      coherence_score: 85,
+      summary: 'Resumen',
+      fallacies: [
+        null,
+        { type: 'asociacion', quote: 'Sin explicación' },
+        { type: 'asociacion', explanation: 'Sin cita' },
+      ],
+    });
+
+    expect(parseModelOutput('modelo/test', conElementosInvalidos).report?.fallacies).toBeNull();
+  });
+
+  it('limita las falacias a un máximo de 3', () => {
+    const content = JSON.stringify({
+      verdict_label: 'verdadero',
+      veracity_score: 90,
+      coherence_score: 85,
+      summary: 'Resumen',
+      fallacies: [
+        { type: 'asociacion', quote: 'a', explanation: 'a' },
+        { type: 'hombre_de_paja', quote: 'b', explanation: 'b' },
+        { type: 'falsa_dicotomia', quote: 'c', explanation: 'c' },
+        { type: 'generalizacion', quote: 'd', explanation: 'd' },
+      ],
+    });
+
+    const { report } = parseModelOutput('modelo/test', content);
+
+    expect(report?.fallacies).toHaveLength(3);
+    expect(report?.fallacies?.map((fallacy) => fallacy.type)).toEqual([
+      'asociacion',
+      'hombre_de_paja',
+      'falsa_dicotomia',
+    ]);
+  });
+});

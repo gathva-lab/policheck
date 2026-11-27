@@ -9,7 +9,13 @@ import { Accordion, AccordionItem, AccordionTrigger, AccordionContent } from '@/
 import { Button } from '@/components/ui/button';
 import { AlertTriangle, ShieldCheck, Activity, BrainCircuit, RefreshCw } from 'lucide-react';
 import { displayLabel, colorFromLabel, type VeracityColor } from '@/lib/veracity';
-import type { ContentNature, ReportQuote } from '@/lib/consensus';
+import {
+    FALLACY_TYPES,
+    type ContentNature,
+    type FallacyType,
+    type ReportFallacy,
+    type ReportQuote,
+} from '@/lib/consensus';
 
 interface AIReport {
     id: string;
@@ -119,6 +125,7 @@ interface PlainContent {
     plainVerdict: string | null;
     plainSummary: string | null;
     quotes: ReportQuote[] | null;
+    fallacies: ReportFallacy[] | null;
     contentNature: ContentNature | null;
 }
 
@@ -126,7 +133,18 @@ const EMPTY_PLAIN_CONTENT: PlainContent = {
     plainVerdict: null,
     plainSummary: null,
     quotes: null,
+    fallacies: null,
     contentNature: null,
+};
+
+const FALLACY_LABELS: Record<FallacyType, string> = {
+    asociacion: 'Asociación no probada',
+    hombre_de_paja: 'Hombre de paja',
+    falsa_dicotomia: 'Falsa dicotomía',
+    apelacion_emocional: 'Apelación emocional',
+    generalizacion: 'Generalización',
+    whataboutism: 'Desviar la crítica con otra conducta',
+    cherry_picking: 'Selección de datos a conveniencia',
 };
 
 function asPlainString(value: unknown): string | null {
@@ -150,6 +168,23 @@ function asQuotes(value: unknown): ReportQuote[] | null {
     return quotes.length > 0 ? quotes : null;
 }
 
+function asFallacies(value: unknown): ReportFallacy[] | null {
+    if (!Array.isArray(value)) return null;
+    const fallacies: ReportFallacy[] = [];
+    for (const item of value) {
+        if (!item || typeof item !== 'object') continue;
+        const obj = item as Record<string, unknown>;
+        const type = asPlainString(obj.type)?.toLowerCase();
+        if (!type || !FALLACY_TYPES.includes(type as FallacyType)) continue;
+        const quote = asPlainString(obj.quote);
+        const explanation = asPlainString(obj.explanation);
+        if (!quote || !explanation) continue;
+        fallacies.push({ type: type as FallacyType, quote, explanation });
+        if (fallacies.length >= 3) break;
+    }
+    return fallacies.length > 0 ? fallacies : null;
+}
+
 function readPlainContent(report: AIReport): PlainContent {
     const raw = report.report_json;
     if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return EMPTY_PLAIN_CONTENT;
@@ -158,8 +193,26 @@ function readPlainContent(report: AIReport): PlainContent {
         plainVerdict: asPlainString(obj.plain_verdict),
         plainSummary: asPlainString(obj.plain_summary),
         quotes: asQuotes(obj.quotes),
+        fallacies: asFallacies(obj.fallacies),
         contentNature: asContentNature(obj.content_nature),
     };
+}
+
+function TechnicalFallacies({ report }: { report: AIReport }) {
+    const fallacies = readPlainContent(report).fallacies;
+    if (!fallacies || fallacies.length === 0) return null;
+    return (
+        <div>
+            <strong className="text-xs uppercase tracking-wider text-slate-500 dark:text-slate-500 block mb-1">Falacias (tipo técnico)</strong>
+            <ul className="space-y-1">
+                {fallacies.map((fallacy, index) => (
+                    <li key={index}>
+                        <code className="rounded bg-slate-200 dark:bg-slate-800 px-1.5 py-0.5 text-xs">{fallacy.type}</code>
+                    </li>
+                ))}
+            </ul>
+        </div>
+    );
 }
 
 const BADGE_CLASS: Record<VeracityColor, string> = {    green: "bg-emerald-100 text-emerald-800 dark:bg-emerald-900/40 dark:text-emerald-300",
@@ -457,7 +510,14 @@ export function AnalysisResults({ sourceId, politicianId, sourceUrl }: AnalysisR
     // Contenido en lenguaje ciudadano: se toma el primer reporte que lo traiga.
     const plainContent = validReports
         .map(readPlainContent)
-        .find((plain) => plain.plainVerdict || plain.plainSummary || plain.contentNature) ?? EMPTY_PLAIN_CONTENT;
+        .find(
+            (plain) =>
+                plain.plainVerdict ||
+                plain.plainSummary ||
+                plain.contentNature ||
+                (plain.quotes && plain.quotes.length > 0) ||
+                (plain.fallacies && plain.fallacies.length > 0)
+        ) ?? EMPTY_PLAIN_CONTENT;
 
     // Alertas de sesgo relevantes (filtramos las nulas y vacías, o donde dice "no se detecta gran sesgo")
     const biases = validReports.map(r => r.bias_analysis).filter(b => b && b.length > 20) as string[];
@@ -569,6 +629,24 @@ export function AnalysisResults({ sourceId, politicianId, sourceUrl }: AnalysisR
                             </ul>
                         </div>
                     )}
+                </section>
+            )}
+
+            {/* Recursos retóricos detectados: solo si hay falacias claras */}
+            {plainContent.fallacies && plainContent.fallacies.length > 0 && (
+                <section className="space-y-4 border-b border-slate-200 dark:border-slate-800 pb-6">
+                    <h5 className="font-bold text-xs uppercase tracking-wider text-muted-foreground">Recursos retóricos detectados</h5>
+                    <ul className="space-y-3">
+                        {plainContent.fallacies.map((fallacy, index) => (
+                            <li key={index} className="rounded-xl border bg-slate-50 dark:bg-slate-900/50 p-4">
+                                <span className="inline-block rounded-full bg-amber-100 px-3 py-1 text-xs font-bold text-amber-800 dark:bg-amber-900/40 dark:text-amber-300">
+                                    {FALLACY_LABELS[fallacy.type]}
+                                </span>
+                                <p className="mt-3 italic text-slate-800 dark:text-slate-200 leading-relaxed">“{fallacy.quote}”</p>
+                                <p className="mt-2 text-sm text-slate-600 dark:text-slate-400 leading-relaxed">{fallacy.explanation}</p>
+                            </li>
+                        ))}
+                    </ul>
                 </section>
             )}
 
@@ -721,6 +799,7 @@ export function AnalysisResults({ sourceId, politicianId, sourceUrl }: AnalysisR
                                         <p className="leading-relaxed">{report.bias_analysis}</p>
                                     </div>
                                 )}
+                                <TechnicalFallacies report={report} />
                             </AccordionContent>
                         </AccordionItem>
                     ))}

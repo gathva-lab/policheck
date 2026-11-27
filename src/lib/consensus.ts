@@ -5,6 +5,26 @@ export interface ReportQuote {
   assessment: string;
 }
 
+// Catálogo cerrado de falacias retóricas. Cualquier tipo fuera de esta lista se
+// descarta al parsear para no romper el análisis.
+export const FALLACY_TYPES = [
+  'asociacion',
+  'hombre_de_paja',
+  'falsa_dicotomia',
+  'apelacion_emocional',
+  'generalizacion',
+  'whataboutism',
+  'cherry_picking',
+] as const;
+
+export type FallacyType = (typeof FALLACY_TYPES)[number];
+
+export interface ReportFallacy {
+  type: FallacyType;
+  quote: string;
+  explanation: string;
+}
+
 export type ContentNature = 'opinion' | 'mixto' | 'factual';
 
 export interface ModelReport {
@@ -18,6 +38,7 @@ export interface ModelReport {
   plainVerdict: string | null;
   plainSummary: string | null;
   quotes: ReportQuote[] | null;
+  fallacies: ReportFallacy[] | null;
   contentNature: ContentNature | null;
 }
 

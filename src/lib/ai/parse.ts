@@ -1,5 +1,12 @@
 import { clampScore, isVerdictLabel, type VerdictLabel } from '../veracity';
-import type { ContentNature, ModelReport, ReportQuote } from '../consensus';
+import {
+  FALLACY_TYPES,
+  type ContentNature,
+  type FallacyType,
+  type ModelReport,
+  type ReportFallacy,
+  type ReportQuote,
+} from '../consensus';
 
 export interface ParsedAnalysis {
   report: ModelReport | null;
@@ -67,6 +74,25 @@ function toQuotes(value: unknown): ReportQuote[] | null {
   return quotes.length > 0 ? quotes : null;
 }
 
+function toFallacies(value: unknown): ReportFallacy[] | null {
+  if (!Array.isArray(value)) return null;
+
+  const fallacies: ReportFallacy[] = [];
+  for (const item of value) {
+    if (!item || typeof item !== 'object') continue;
+    const obj = item as Record<string, unknown>;
+    const type = toString(obj.type)?.toLowerCase();
+    if (!type || !FALLACY_TYPES.includes(type as FallacyType)) continue;
+    const quote = toString(obj.quote);
+    const explanation = toString(obj.explanation);
+    if (!quote || !explanation) continue;
+    fallacies.push({ type: type as FallacyType, quote, explanation });
+    if (fallacies.length === 3) break;
+  }
+
+  return fallacies.length > 0 ? fallacies : null;
+}
+
 export function parseModelOutput(modelName: string, content: string): ParsedAnalysis {
   const raw = extractJsonObject(content);
   if (!raw || typeof raw !== 'object') return { report: null, raw };
@@ -84,6 +110,7 @@ export function parseModelOutput(modelName: string, content: string): ParsedAnal
       plainVerdict: toString(obj.plain_verdict),
       plainSummary: toString(obj.plain_summary),
       quotes: toQuotes(obj.quotes),
+      fallacies: toFallacies(obj.fallacies),
       contentNature: toContentNature(obj.content_nature),
     },
     raw,
