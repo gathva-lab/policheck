@@ -11,6 +11,7 @@ function report(partial: Partial<ModelReport>): ModelReport {
     plainVerdict: null,
     plainSummary: null,
     quotes: null,
+    fallacies: null,
     contentNature: null,
     ...partial,
   };
