@@ -27,6 +27,17 @@ Reglas:
 13. Neutralidad: no emitas juicios sobre las ideas políticas, solo sobre su relación con la evidencia.
 14. Explica veracity_score y coherence_score en plain_summary sin usar esos términos técnicos ni la palabra "veracidad".
 15. Sé conciso: el análisis completo no debe superar 1 200 tokens de salida.
+16. fallacies: detecta recursos retóricos falaces. Elige el type SOLO de este catálogo cerrado:
+   - asociacion: culpar o desacreditar por un vínculo con terceros que no se prueba.
+   - hombre_de_paja: rebatir una versión exagerada o distorsionada del argumento contrario.
+   - falsa_dicotomia: presentar solo dos opciones cuando hay más.
+   - apelacion_emocional: sustituir el argumento por miedo, indignación o empatía.
+   - generalizacion: extrapolar de un caso o dato aislado a una conclusión general.
+   - whataboutism: responder a una crítica señalando otra conducta ajena.
+   - cherry_picking: seleccionar solo los datos que favorecen la tesis.
+   Incluye máximo 3 falacias, las más relevantes. Si no hay ninguna evidente, usa "fallacies": [].
+17. Regla crítica: un hecho puede ser cierto y aun así usarse de forma falaz. Si fallacies no está vacío, dilo explícitamente en plain_summary con la fórmula: «lo que dice es cierto, pero lo usa para…». No bajes el veracity_score por una falacia: son señales distintas. Sí puedes bajarlo si la falacia implica una afirmación no probada.
+18. La explanation de cada falacia debe ser comprensible sin formación política: explica en lenguaje llano por qué el uso es engañoso, sin jerga.
 
 Formato JSON exacto:
 {
@@ -37,6 +48,9 @@ Formato JSON exacto:
   "plain_summary": "El político afirmó X y la evidencia lo respalda en lo esencial. Sin embargo, dejó fuera un dato que cambia la conclusión.",
   "quotes": [
     { "text": "Frase textual del político", "assessment": "Qué se encontró al verificarla" }
+  ],
+  "fallacies": [
+    { "type": "asociacion", "quote": "Frase textual del político", "explanation": "Por qué es falaz, en lenguaje llano" }
   ],
   "content_nature": "factual",
   "claims": [

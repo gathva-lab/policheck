@@ -40,3 +40,37 @@ describe('FEVER_SYSTEM_PROMPT: lenguaje ciudadano', () => {
     expect(FEVER_SYSTEM_PROMPT).toContain('supera los 30 minutos');
   });
 });
+
+describe('FEVER_SYSTEM_PROMPT: detección de falacias', () => {
+  it('pide el campo fallacies con type, quote y explanation', () => {
+    expect(FEVER_SYSTEM_PROMPT).toContain('"fallacies"');
+    expect(FEVER_SYSTEM_PROMPT).toContain('"type"');
+    expect(FEVER_SYSTEM_PROMPT).toContain('"quote"');
+    expect(FEVER_SYSTEM_PROMPT).toContain('"explanation"');
+  });
+
+  it('incluye el catálogo cerrado de tipos', () => {
+    for (const type of [
+      'asociacion',
+      'hombre_de_paja',
+      'falsa_dicotomia',
+      'apelacion_emocional',
+      'generalizacion',
+      'whataboutism',
+      'cherry_picking',
+    ]) {
+      expect(FEVER_SYSTEM_PROMPT).toContain(type);
+    }
+  });
+
+  it('incluye la regla de hecho cierto con uso falaz y no bajar veracity_score', () => {
+    expect(FEVER_SYSTEM_PROMPT).toContain('lo que dice es cierto, pero lo usa para');
+    expect(FEVER_SYSTEM_PROMPT).toContain('No bajes el veracity_score por una falacia');
+    expect(FEVER_SYSTEM_PROMPT).toContain('son señales distintas');
+  });
+
+  it('limita las falacias a 3 y pide explicación en lenguaje llano', () => {
+    expect(FEVER_SYSTEM_PROMPT).toContain('máximo 3 falacias');
+    expect(FEVER_SYSTEM_PROMPT).toContain('comprensible sin formación política');
+  });
+});
