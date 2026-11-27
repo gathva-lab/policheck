@@ -2,7 +2,9 @@ import { describe, it, expect } from 'vitest';
 import {
   computeConsensus,
   detectInternalInconsistency,
+  dominantContentNature,
   justificationContradictsVerdict,
+  median,
   type ModelReport,
 } from './consensus';
 
@@ -23,7 +25,73 @@ function report(partial: Partial<ModelReport>): ModelReport {
   };
 }
 
+describe('median', () => {
+  it('con longitud impar devuelve el central sin interpolar', () => {
+    expect(median([2, 3, 65])).toBe(3);
+  });
+
+  it('con longitud par interpola los dos valores centrales', () => {
+    expect(median([65, 70])).toBe(67.5);
+  });
+});
+
+describe('dominantContentNature', () => {
+  it('devuelve opinion con mayoría estricta de dos tercios', () => {
+    expect(
+      dominantContentNature([
+        report({ modelName: 'a', contentNature: 'opinion' }),
+        report({ modelName: 'b', contentNature: 'opinion' }),
+        report({ modelName: 'c', contentNature: 'factual' }),
+      ])
+    ).toBe('opinion');
+  });
+
+  it('devuelve null cuando solo un tercio declara opinion', () => {
+    expect(
+      dominantContentNature([
+        report({ modelName: 'a', contentNature: 'opinion' }),
+        report({ modelName: 'b', contentNature: 'factual' }),
+        report({ modelName: 'c', contentNature: 'mixto' }),
+      ])
+    ).toBeNull();
+  });
+});
+
 describe('computeConsensus', () => {
+  it('usa la mediana y la mayoría de opinión en el caso real JgvC9xaUKN8', () => {
+    const result = computeConsensus([
+      report({
+        modelName: 'nvidia/nemotron-3-ultra-550b-a55b',
+        contentNature: 'opinion',
+        veracityScore: 2,
+        verdictLabel: 'inchequeable',
+      }),
+      report({
+        modelName: 'tencent/hy4-flash',
+        contentNature: 'opinion',
+        veracityScore: 3,
+        verdictLabel: 'inchequeable',
+      }),
+      report({
+        modelName: 'deepseek/deepseek-v4.1-flash',
+        contentNature: 'opinion',
+        veracityScore: 65,
+        verdictLabel: 'discutible',
+      }),
+    ]);
+
+    expect(result.verdictScore).toBe(3);
+    expect(result.meanScore).toBe(2.5);
+    expect(result.outlierDetected).toBe(true);
+    expect(result.outlierModel).toBe('deepseek/deepseek-v4.1-flash');
+    expect(result.natureOverride).toBe(true);
+    expect(result.natureOverrideReason).toBe('mayoria_opinion');
+    expect(result.verdictLabel).toBe('inchequeable');
+    expect(result.discardReasons['deepseek/deepseek-v4.1-flash']).toBe(
+      'opinion_con_score_alto'
+    );
+  });
+
   it('publica veredicto cuando al menos 2 de 3 modelos coinciden en la etiqueta', () => {
     const result = computeConsensus([
       report({ modelName: 'a', verdictLabel: 'exagerado', veracityScore: 40 }),
@@ -128,15 +196,22 @@ describe('detectInternalInconsistency', () => {
     expect(result).toBe('opinion_con_score_alto');
   });
 
+  it('marca opinión con score 65 como incoherente (umbral realista de 40)', () => {
+    const result = detectInternalInconsistency(
+      report({ contentNature: 'opinion', veracityScore: 65, verdictLabel: 'discutible' })
+    );
+    expect(result).toBe('opinion_con_score_alto');
+  });
+
   it('marca opinión con veredicto verdadero o verdadero_pero', () => {
     expect(
       detectInternalInconsistency(
-        report({ contentNature: 'opinion', veracityScore: 65, verdictLabel: 'verdadero' })
+        report({ contentNature: 'opinion', veracityScore: 40, verdictLabel: 'verdadero' })
       )
     ).toBe('opinion_con_veredicto_positivo');
     expect(
       detectInternalInconsistency(
-        report({ contentNature: 'opinion', veracityScore: 65, verdictLabel: 'verdadero_pero' })
+        report({ contentNature: 'opinion', veracityScore: 40, verdictLabel: 'verdadero_pero' })
       )
     ).toBe('opinion_con_veredicto_positivo');
   });
@@ -144,7 +219,7 @@ describe('detectInternalInconsistency', () => {
   it('no marca reportes coherentes', () => {
     expect(
       detectInternalInconsistency(
-        report({ contentNature: 'opinion', veracityScore: 65, verdictLabel: 'discutible' })
+        report({ contentNature: 'opinion', veracityScore: 40, verdictLabel: 'discutible' })
       )
     ).toBeNull();
     expect(
@@ -157,7 +232,7 @@ describe('detectInternalInconsistency', () => {
 });
 
 describe('computeConsensus: coherencia interna', () => {
-  it('descarta el caso real mixto con score 3 y no contamina el promedio', () => {
+  it('descarta opinión con score 65 y no contamina el promedio', () => {
     const result = computeConsensus([
       report({
         modelName: 'deepseek-v4.1-flash',
@@ -166,20 +241,28 @@ describe('computeConsensus: coherencia interna', () => {
         verdictLabel: 'discutible',
       }),
       report({
+        modelName: 'nvidia/nemotron-3-ultra-550b-a55b',
+        contentNature: 'factual',
+        veracityScore: 80,
+        verdictLabel: 'verdadero_pero',
+      }),
+      report({
         modelName: 'tencent/hy4-flash',
-        contentNature: 'mixto',
-        veracityScore: 3,
-        verdictLabel: 'inchequeable',
+        contentNature: 'factual',
+        veracityScore: 85,
+        verdictLabel: 'verdadero_pero',
       }),
     ]);
 
     expect(result.discardedReports).toHaveLength(1);
-    expect(result.discardedReports[0].modelName).toBe('tencent/hy4-flash');
-    expect(result.discardReasons['tencent/hy4-flash']).toBe('mixto_con_score_inchequeable');
-    // El promedio usa solo el reporte coherente (65), no el 34 contaminado.
-    expect(result.averageVeracity).toBe(65);
-    expect(result.usedReports).toHaveLength(1);
-    expect(result.requiresReview).toBe(true);
+    expect(result.discardedReports[0].modelName).toBe('deepseek-v4.1-flash');
+    expect(result.discardReasons['deepseek-v4.1-flash']).toBe('opinion_con_score_alto');
+    // El promedio usa solo los reportes coherentes, no el 65 descartado.
+    expect(result.meanScore).toBe(82.5);
+    expect(result.averageVeracity).toBe(82.5);
+    expect(result.usedReports).toHaveLength(2);
+    expect(result.requiresReview).toBe(false);
+    expect(result.natureOverride).toBe(false);
   });
 
   it('si todos son incoherentes no descarta ninguno y marca revisión', () => {
