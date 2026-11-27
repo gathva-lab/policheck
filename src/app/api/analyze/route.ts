@@ -401,6 +401,8 @@ export async function POST(request: Request) {
       .update({
         verdict: null,
         verdict_score: null,
+        mean_score: null,
+        nature_override: false,
         consensus_agreement: null,
         jev_support: null,
         requires_review: false,
@@ -952,7 +954,7 @@ export async function POST(request: Request) {
   // (`isVerifiable`) sigue siendo una sola llamada: es barato y no decide.
   const jevVerification = await jevConsensus(
     consensus.verdictLabel,
-    consensus.averageVeracity,
+    consensus.verdictScore,
     consensusSummary,
     content.text,
     apiKey
@@ -993,7 +995,9 @@ export async function POST(request: Request) {
     .update({
       status: finalStatus,
       verdict: consensus.verdictLabel,
-      verdict_score: consensus.averageVeracity,
+      verdict_score: consensus.verdictScore,
+      mean_score: consensus.meanScore,
+      nature_override: consensus.natureOverride,
       consensus_agreement: finalAgreement,
       jev_support: finalJevSupport,
       requires_review: finalRequiresReview,

@@ -8,6 +8,7 @@ import {
   type ModelCheckResult,
 } from '@/lib/ai/llm';
 import { fetchNvidiaModelCatalog } from '@/lib/ai/nvidia';
+import { maintenanceAuthFailure } from '@/lib/maintenance-auth';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -29,9 +30,9 @@ interface ModelRow {
 }
 
 export async function POST(request: Request) {
-  const expectedKey = process.env.SWEEP_KEY ?? process.env.SUPABASE_SERVICE_ROLE_KEY;
-  if (!expectedKey || request.headers.get('x-sweep-key') !== expectedKey) {
-    return NextResponse.json({ error: 'No autorizado' }, { status: 401 });
+  const authFailure = maintenanceAuthFailure(request);
+  if (authFailure) {
+    return NextResponse.json(authFailure.body, { status: authFailure.status });
   }
 
   if (!process.env.NEXT_PUBLIC_SUPABASE_URL || !process.env.SUPABASE_SERVICE_ROLE_KEY) {
