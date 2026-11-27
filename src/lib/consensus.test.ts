@@ -1,5 +1,10 @@
 import { describe, it, expect } from 'vitest';
-import { computeConsensus, justificationContradictsVerdict, type ModelReport } from './consensus';
+import {
+  computeConsensus,
+  detectInternalInconsistency,
+  justificationContradictsVerdict,
+  type ModelReport,
+} from './consensus';
 
 function report(partial: Partial<ModelReport>): ModelReport {
   return {
@@ -98,6 +103,111 @@ describe('computeConsensus', () => {
     expect(result.usedReports).toHaveLength(2);
     expect(result.verdictLabel).toBe('verdadero');
     expect(result.consensusAgreement).toBe(100);
+  });
+});
+
+describe('detectInternalInconsistency', () => {
+  it('marca mixto con score menor a 10', () => {
+    const result = detectInternalInconsistency(
+      report({ contentNature: 'mixto', veracityScore: 3, verdictLabel: 'inchequeable' })
+    );
+    expect(result).toBe('mixto_con_score_inchequeable');
+  });
+
+  it('marca factual con score menor a 15', () => {
+    const result = detectInternalInconsistency(
+      report({ contentNature: 'factual', veracityScore: 14, verdictLabel: 'insostenible' })
+    );
+    expect(result).toBe('factual_con_score_bajo');
+  });
+
+  it('marca opinión con score mayor a 75', () => {
+    const result = detectInternalInconsistency(
+      report({ contentNature: 'opinion', veracityScore: 80, verdictLabel: 'discutible' })
+    );
+    expect(result).toBe('opinion_con_score_alto');
+  });
+
+  it('marca opinión con veredicto verdadero o verdadero_pero', () => {
+    expect(
+      detectInternalInconsistency(
+        report({ contentNature: 'opinion', veracityScore: 65, verdictLabel: 'verdadero' })
+      )
+    ).toBe('opinion_con_veredicto_positivo');
+    expect(
+      detectInternalInconsistency(
+        report({ contentNature: 'opinion', veracityScore: 65, verdictLabel: 'verdadero_pero' })
+      )
+    ).toBe('opinion_con_veredicto_positivo');
+  });
+
+  it('no marca reportes coherentes', () => {
+    expect(
+      detectInternalInconsistency(
+        report({ contentNature: 'opinion', veracityScore: 65, verdictLabel: 'discutible' })
+      )
+    ).toBeNull();
+    expect(
+      detectInternalInconsistency(
+        report({ contentNature: 'factual', veracityScore: 65, verdictLabel: 'verdadero_pero' })
+      )
+    ).toBeNull();
+    expect(detectInternalInconsistency(report({ veracityScore: null }))).toBeNull();
+  });
+});
+
+describe('computeConsensus: coherencia interna', () => {
+  it('descarta el caso real mixto con score 3 y no contamina el promedio', () => {
+    const result = computeConsensus([
+      report({
+        modelName: 'deepseek-v4.1-flash',
+        contentNature: 'opinion',
+        veracityScore: 65,
+        verdictLabel: 'discutible',
+      }),
+      report({
+        modelName: 'tencent/hy4-flash',
+        contentNature: 'mixto',
+        veracityScore: 3,
+        verdictLabel: 'inchequeable',
+      }),
+    ]);
+
+    expect(result.discardedReports).toHaveLength(1);
+    expect(result.discardedReports[0].modelName).toBe('tencent/hy4-flash');
+    expect(result.discardReasons['tencent/hy4-flash']).toBe('mixto_con_score_inchequeable');
+    // El promedio usa solo el reporte coherente (65), no el 34 contaminado.
+    expect(result.averageVeracity).toBe(65);
+    expect(result.usedReports).toHaveLength(1);
+    expect(result.requiresReview).toBe(true);
+  });
+
+  it('si todos son incoherentes no descarta ninguno y marca revisión', () => {
+    const result = computeConsensus([
+      report({
+        modelName: 'a',
+        contentNature: 'mixto',
+        veracityScore: 3,
+        verdictLabel: 'inchequeable',
+      }),
+      report({
+        modelName: 'b',
+        contentNature: 'factual',
+        veracityScore: 10,
+        verdictLabel: 'insostenible',
+      }),
+      report({
+        modelName: 'c',
+        contentNature: 'opinion',
+        veracityScore: 80,
+        verdictLabel: 'verdadero',
+      }),
+    ]);
+
+    expect(result.discardedReports).toHaveLength(0);
+    expect(result.discardReasons).toEqual({});
+    expect(result.usedReports).toHaveLength(3);
+    expect(result.requiresReview).toBe(true);
   });
 });
 
