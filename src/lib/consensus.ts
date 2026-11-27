@@ -62,8 +62,11 @@ export interface ModelReport {
 export type NatureOverrideReason = 'mayoria_opinion';
 
 export interface ConsensusResult {
-  // Mediana de los puntajes de los reportes con datos: es el verdict_score.
+  // Mediana de los puntajes de los reportes usados: es el verdict_score.
   verdictScore: number | null;
+  // Mediana de todos los candidatos (incluidos los descartados). Es solo
+  // diagnóstico: sirve para detectar outliers, nunca se muestra como veracidad.
+  candidateMedianScore: number | null;
   // Promedio de los reportes no descartados, conservado para trazabilidad.
   meanScore: number | null;
   // Alias histórico de meanScore para consumidores antiguos.
@@ -154,54 +157,74 @@ export function median(values: number[]): number {
 
 // Naturaleza con mayoría estricta sobre el total de reportes. Un reporte sin
 // naturaleza cuenta en el denominador: así 1 de 3 no alcanza la mayoría.
+// Si no hay mayoría y el empate es entre dos naturalezas, se prefiere la más
+// prudente (opinion > mixto > factual): ser conservador protege al político de
+// un veredicto injusto.
+const NATURE_PRUDENCE: ContentNature[] = ['opinion', 'mixto', 'factual'];
+
 export function dominantContentNature(reports: ModelReport[]): ContentNature | null {
   if (reports.length === 0) return null;
   const counts: Record<ContentNature, number> = { opinion: 0, mixto: 0, factual: 0 };
   for (const report of reports) {
     if (report.contentNature) counts[report.contentNature] += 1;
   }
-  for (const nature of ['opinion', 'mixto', 'factual'] as const) {
+  for (const nature of NATURE_PRUDENCE) {
     if (counts[nature] * 2 > reports.length) return nature;
   }
+
+  // Desempate solo cuando exactamente dos naturalezas comparten el máximo.
+  // Un empate triple, o un máximo que no alcanza mayoría por los reportes sin
+  // naturaleza, sigue devolviendo null para no inventar una mayoría.
+  let maxCount = 0;
+  for (const nature of NATURE_PRUDENCE) {
+    if (counts[nature] > maxCount) maxCount = counts[nature];
+  }
+  if (maxCount === 0) return null;
+  const tied = NATURE_PRUDENCE.filter((nature) => counts[nature] === maxCount);
+  if (tied.length === 2) return tied[0];
   return null;
 }
 
 interface ConsensusStats {
   verdictScore: number | null;
+  candidateMedianScore: number | null;
   meanScore: number | null;
   outlierDetected: boolean;
   outlierModel: string | null;
 }
 
-// La mediana se calcula sobre todos los reportes con puntaje para que un
-// disidente descartado no oculte la señal de outlier. El promedio usa solo los
-// reportes que entran al consenso.
+// verdict_score es la mediana de los reportes que entran al consenso: no se
+// puede descartar un reporte por poco fiable y usar su puntaje como cifra
+// principal. La mediana de todos los candidatos se conserva solo para el
+// diagnóstico de outlier, porque un disidente descartado sigue siendo una señal
+// de que los modelos no coinciden.
 function computeStats(candidateReports: ModelReport[], usedReports: ModelReport[]): ConsensusStats {
   const candidateScores = candidateReports.map((report) => report.veracityScore as number);
   const usedScores = usedReports.map((report) => report.veracityScore as number);
-  const verdictScore = candidateScores.length > 0 ? median(candidateScores) : null;
+  const verdictScore = usedScores.length > 0 ? median(usedScores) : null;
+  const candidateMedianScore = candidateScores.length > 0 ? median(candidateScores) : null;
   const meanScore = average(usedScores);
   const candidateMean = average(candidateScores);
 
   let outlierDetected = false;
   let outlierModel: string | null = null;
-  if (verdictScore !== null) {
+  if (candidateMedianScore !== null) {
     let maxDistance = 0;
     let farthestModel: string | null = null;
     for (const report of candidateReports) {
-      const distance = Math.abs((report.veracityScore as number) - verdictScore);
+      const distance = Math.abs((report.veracityScore as number) - candidateMedianScore);
       if (distance > maxDistance) {
         maxDistance = distance;
         farthestModel = report.modelName;
       }
     }
     const divergence =
-      candidateMean !== null ? Math.abs(verdictScore - candidateMean) : 0;
+      candidateMean !== null ? Math.abs(candidateMedianScore - candidateMean) : 0;
     outlierDetected = divergence > 25 || maxDistance > 25;
     if (outlierDetected) outlierModel = farthestModel;
   }
 
-  return { verdictScore, meanScore, outlierDetected, outlierModel };
+  return { verdictScore, candidateMedianScore, meanScore, outlierDetected, outlierModel };
 }
 
 function clampToInchequeable(score: number | null): number | null {
@@ -283,7 +306,9 @@ export function computeConsensus(reports: ModelReport[], minimumValid = 2): Cons
   }
 
   const stats = computeStats(candidates, usedReports);
-  const dominantNature = dominantContentNature(usedReports);
+  // La naturaleza describe qué es el texto, no la fiabilidad del reporte: un
+  // reporte descartado por incoherencia sigue votando su tipo de contenido.
+  const dominantNature = dominantContentNature(candidates);
   const natureOverride = dominantNature === 'opinion';
   const natureOverrideReason: NatureOverrideReason | null = natureOverride
     ? 'mayoria_opinion'
@@ -302,6 +327,7 @@ export function computeConsensus(reports: ModelReport[], minimumValid = 2): Cons
     const partialLabel = singleReport?.verdictLabel ?? null;
     return {
       verdictScore,
+      candidateMedianScore: stats.candidateMedianScore,
       meanScore: stats.meanScore,
       averageVeracity: stats.meanScore,
       averageCoherence,
@@ -342,6 +368,7 @@ export function computeConsensus(reports: ModelReport[], minimumValid = 2): Cons
 
   return {
     verdictScore,
+    candidateMedianScore: stats.candidateMedianScore,
     meanScore: stats.meanScore,
     averageVeracity: stats.meanScore,
     averageCoherence,

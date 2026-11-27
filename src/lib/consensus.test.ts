@@ -55,6 +55,112 @@ describe('dominantContentNature', () => {
       ])
     ).toBeNull();
   });
+
+  it('con [opinion, opinion, mixto] gana opinion por mayoría estricta', () => {
+    expect(
+      dominantContentNature([
+        report({ modelName: 'a', contentNature: 'opinion' }),
+        report({ modelName: 'b', contentNature: 'opinion' }),
+        report({ modelName: 'c', contentNature: 'mixto' }),
+      ])
+    ).toBe('opinion');
+  });
+
+  it('con empate [opinion, mixto] prefiere la naturaleza más prudente', () => {
+    expect(
+      dominantContentNature([
+        report({ modelName: 'a', contentNature: 'mixto' }),
+        report({ modelName: 'b', contentNature: 'opinion' }),
+      ])
+    ).toBe('opinion');
+  });
+
+  it('con [mixto, mixto, factual] gana mixto por mayoría estricta', () => {
+    expect(
+      dominantContentNature([
+        report({ modelName: 'a', contentNature: 'mixto' }),
+        report({ modelName: 'b', contentNature: 'mixto' }),
+        report({ modelName: 'c', contentNature: 'factual' }),
+      ])
+    ).toBe('mixto');
+  });
+});
+
+describe('computeConsensus: verdict_score solo con reportes usados', () => {
+  it('con [2, 65, 68] y el 65 descartado da verdictScore 35 y candidateMedianScore 65', () => {
+    const result = computeConsensus([
+      report({
+        modelName: 'nvidia/nemotron-3-ultra-550b-a55b',
+        veracityScore: 2,
+        verdictLabel: 'inchequeable',
+      }),
+      report({
+        modelName: 'deepseek/deepseek-v4.1-flash',
+        contentNature: 'opinion',
+        veracityScore: 65,
+        verdictLabel: 'discutible',
+      }),
+      report({
+        modelName: 'tencent/hy4-flash',
+        veracityScore: 68,
+        verdictLabel: 'discutible',
+      }),
+    ]);
+
+    expect(result.discardedReports).toHaveLength(1);
+    expect(result.discardedReports[0].modelName).toBe('deepseek/deepseek-v4.1-flash');
+    expect(result.usedReports.map((r) => r.veracityScore)).toEqual([2, 68]);
+    // El 65 descartado no puede ser la cifra principal de veracidad.
+    expect(result.verdictScore).toBe(35);
+    expect(result.meanScore).toBe(35);
+    // El 65 solo sobrevive en el diagnóstico de outlier.
+    expect(result.candidateMedianScore).toBe(65);
+    expect(result.outlierDetected).toBe(true);
+  });
+
+  it('el caso real 19:22 recupera nature_override y veredicto inchequeable', () => {
+    const result = computeConsensus([
+      report({
+        modelName: 'nvidia/nemotron-3-ultra-550b-a55b',
+        contentNature: 'opinion',
+        veracityScore: 2,
+        verdictLabel: 'inchequeable',
+      }),
+      report({
+        modelName: 'deepseek/deepseek-v4.1-flash',
+        contentNature: 'opinion',
+        veracityScore: 65,
+        verdictLabel: 'discutible',
+      }),
+      report({
+        modelName: 'tencent/hy4-flash',
+        contentNature: 'mixto',
+        veracityScore: 68,
+        verdictLabel: 'discutible',
+      }),
+    ]);
+
+    // Aunque deepseek se descarte, su voto de naturaleza sigue contando.
+    expect(result.natureOverride).toBe(true);
+    expect(result.natureOverrideReason).toBe('mayoria_opinion');
+    expect(result.verdictLabel).toBe('inchequeable');
+    // Al forzar inchequeable, el puntaje se limita a la franja 0-4.
+    expect(result.verdictScore).toBe(4);
+    expect(result.meanScore).toBe(35);
+    expect(result.candidateMedianScore).toBe(65);
+  });
+
+  it('si no hay reportes usados el verdictScore es null, nunca 0', () => {
+    const result = computeConsensus([
+      report({ modelName: 'a', verdictLabel: null, veracityScore: null }),
+      report({ modelName: 'b', verdictLabel: null, veracityScore: null }),
+    ]);
+
+    expect(result.usedReports).toHaveLength(0);
+    expect(result.verdictScore).toBeNull();
+    expect(result.candidateMedianScore).toBeNull();
+    expect(result.meanScore).toBeNull();
+  });
 });
 
 describe('computeConsensus', () => {
@@ -80,8 +186,9 @@ describe('computeConsensus', () => {
       }),
     ]);
 
-    expect(result.verdictScore).toBe(3);
+    expect(result.verdictScore).toBe(2.5);
     expect(result.meanScore).toBe(2.5);
+    expect(result.candidateMedianScore).toBe(3);
     expect(result.outlierDetected).toBe(true);
     expect(result.outlierModel).toBe('deepseek/deepseek-v4.1-flash');
     expect(result.natureOverride).toBe(true);
