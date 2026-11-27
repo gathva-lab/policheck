@@ -89,3 +89,12 @@ describe('FEVER_SYSTEM_PROMPT: contraste con datos oficiales', () => {
     expect(FEVER_SYSTEM_PROMPT).toContain('NO modifica el veracity_score');
   });
 });
+
+describe('FEVER_SYSTEM_PROMPT: sin cifras de puntaje en el resumen ciudadano', () => {
+  it('prohíbe citar números de puntaje en plain_verdict y plain_summary', () => {
+    expect(FEVER_SYSTEM_PROMPT).toContain('No cites números de puntaje');
+    expect(FEVER_SYSTEM_PROMPT).toContain('plain_verdict ni en plain_summary');
+    expect(FEVER_SYSTEM_PROMPT).toContain('confunde al lector');
+    expect(FEVER_SYSTEM_PROMPT).toContain('Explica la valoración en palabras');
+  });
+});
